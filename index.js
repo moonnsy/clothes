@@ -297,6 +297,9 @@ function buildModal() {
                     <span class="cl-label">Context Depth</span>
                     <input type="number" id="cl-setting-depth" class="cl-input-field" value="0" min="0" max="999">
 
+                    <span class="cl-label">AI Description Max Tokens</span>
+                    <input type="number" id="cl-setting-max-tokens" class="cl-input-field" value="4000" min="10" max="100000">
+
                     <label class="cl-checkbox-wrapper" style="margin-top: 15px;">
                         <input type="checkbox" id="cl-setting-quick-icon" class="cl-checkbox">
                         <div class="cl-checkbox-custom"></div>
@@ -516,6 +519,10 @@ function bindEvents() {
     $('#cl-setting-depth').on('input change', function() {
         localStorage.setItem('clothes_depth', $(this).val());
         updateContext();
+    });
+
+    $('#cl-setting-max-tokens').on('input change', function() {
+        localStorage.setItem('clothes_max_tokens', $(this).val());
     });
 
     $('#cl-folder-select').on('change', function() {
@@ -941,11 +948,12 @@ async function describeImageEdit() {
                 ]
             }];
 
+            const maxTokens = parseInt(localStorage.getItem('clothes_max_tokens') || '4000', 10);
             let generate_data = {
                 'messages': messages,
                 'model': profile.model,
                 'temperature': 0.7,
-                'max_tokens': 1000,
+                'max_tokens': maxTokens,
                 'stream': false,
                 'chat_completion_source': cc_source,
             };
@@ -1137,6 +1145,9 @@ function loadState() {
     
     const depth = localStorage.getItem('clothes_depth') || '0';
     $('#cl-setting-depth').val(depth);
+    
+    const maxTokens = localStorage.getItem('clothes_max_tokens') || '4000';
+    $('#cl-setting-max-tokens').val(maxTokens);
     
     const showQuick = localStorage.getItem('clothes_quick_icon') === 'true';
     $('#cl-setting-quick-icon').prop('checked', showQuick);
