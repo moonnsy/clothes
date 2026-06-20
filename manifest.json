@@ -1,0 +1,13 @@
+{
+    "name": "Clothes",
+    "display_name": "Clothes",
+    "description": "Extension for managing character and user outfits with AI vision assistance",
+    "version": "1.0.0",
+    "author": "moonnsy",
+    "js": "index.js",
+    "css": "style.css",
+    "module": true,
+    "requires": [],
+    "optional": [],
+    "assets": []
+}
