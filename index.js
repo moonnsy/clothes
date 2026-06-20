@@ -758,7 +758,13 @@ function renderGallery() {
             setActiveItem(currentEntity, activeItems[currentEntity] === item.id ? null : item.id);
             updateContext();
             updateSTScriptVariables();
-            renderGallery();
+            
+            // Update visually without rebuilding the DOM to prevent scroll jumps
+            $('#cl-gallery-grid .cl-card').removeClass('active-item');
+            const newActive = getActiveItems()[currentEntity];
+            if (newActive) {
+                $(`#cl-gallery-grid .cl-card[data-id="${newActive}"]`).addClass('active-item');
+            }
         });
 
         // Edit
