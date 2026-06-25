@@ -10,101 +10,150 @@ let clothesState = {
     activeUserItemId: null // Legacy global fallback
 };
 
-// --- CHAT SPECIFIC STATE ---
-function getActiveItems() {
-    const stContext = typeof getContext === 'function' ? getContext() : null;
-    if (stContext && stContext.chatMetadata) {
-        if (!stContext.chatMetadata.clothes) stContext.chatMetadata.clothes = {};
-        if (!stContext.chatMetadata.clothes.entities) stContext.chatMetadata.clothes.entities = {};
-        
-        // Migrate old char/user layout to entities if needed
-        if (stContext.chatMetadata.clothes.char && !stContext.chatMetadata.clothes.entities[stContext.name2]) {
-             stContext.chatMetadata.clothes.entities[stContext.name2 || 'Character'] = stContext.chatMetadata.clothes.char;
-             delete stContext.chatMetadata.clothes.char;
-        }
-        if (stContext.chatMetadata.clothes.user && !stContext.chatMetadata.clothes.entities[stContext.name1]) {
-             stContext.chatMetadata.clothes.entities[stContext.name1 || 'User'] = stContext.chatMetadata.clothes.user;
-             delete stContext.chatMetadata.clothes.user;
-        }
-        
-        return stContext.chatMetadata.clothes.entities;
-    }
-    
-    // Global fallback
-    if (!clothesState.activeEntities) clothesState.activeEntities = {};
-    if (clothesState.activeCharItemId) {
-        clothesState.activeEntities['Character'] = clothesState.activeCharItemId;
-        clothesState.activeCharItemId = null;
-    }
-    if (clothesState.activeUserItemId) {
-        clothesState.activeEntities['User'] = clothesState.activeUserItemId;
-        clothesState.activeUserItemId = null;
-    }
-    return clothesState.activeEntities;
-}
-
-function setActiveItem(entityName, id) {
-    const stContext = typeof getContext === 'function' ? getContext() : null;
-    if (stContext && stContext.chatMetadata) {
-        if (!stContext.chatMetadata.clothes) stContext.chatMetadata.clothes = {};
-        if (!stContext.chatMetadata.clothes.entities) stContext.chatMetadata.clothes.entities = {};
-        
-        if (id) {
-            stContext.chatMetadata.clothes.entities[entityName] = id;
-        } else {
-            delete stContext.chatMetadata.clothes.entities[entityName];
-        }
-        
-        if (typeof stContext.saveMetadataDebounced === 'function') stContext.saveMetadataDebounced();
-    } else {
-        if (!clothesState.activeEntities) clothesState.activeEntities = {};
-        if (id) {
-            clothesState.activeEntities[entityName] = id;
-        } else {
-            delete clothesState.activeEntities[entityName];
-        }
-        saveState();
-    }
-}
-
-function getActiveTagFilter(entityName) {
-    const stContext = typeof getContext === 'function' ? getContext() : null;
-    if (stContext && stContext.chatMetadata && stContext.chatMetadata.clothes && stContext.chatMetadata.clothes.tagFilters) {
-        return stContext.chatMetadata.clothes.tagFilters[entityName] || null;
-    }
-    return clothesState.activeTagFilters ? clothesState.activeTagFilters[entityName] || null : null;
-}
-
-function setActiveTagFilter(entityName, tag) {
-    const stContext = typeof getContext === 'function' ? getContext() : null;
-    if (stContext && stContext.chatMetadata) {
-        if (!stContext.chatMetadata.clothes) stContext.chatMetadata.clothes = {};
-        if (!stContext.chatMetadata.clothes.tagFilters) stContext.chatMetadata.clothes.tagFilters = {};
-        
-        if (tag) {
-            stContext.chatMetadata.clothes.tagFilters[entityName] = tag;
-        } else {
-            delete stContext.chatMetadata.clothes.tagFilters[entityName];
-        }
-        if (typeof stContext.saveMetadataDebounced === 'function') stContext.saveMetadataDebounced();
-    } else {
-        if (!clothesState.activeTagFilters) clothesState.activeTagFilters = {};
-        if (tag) {
-            clothesState.activeTagFilters[entityName] = tag;
-        } else {
-            delete clothesState.activeTagFilters[entityName];
-        }
-        saveState();
-    }
-}
-
+let currentMode = 'clothes'; // 'clothes' | 'location'
 let activeProfileName = '';
 let currentView = 'gallery'; // 'gallery' | 'edit'
 let editingItemId = null;
 let currentEntity = '';
 let currentType = 'char'; // 'char' | 'user'
 let currentFolder = 'All'; // 'All' | folderName
+let currentSubCategory = 'all'; // 'all' | 'outfit' | 'hairstyle' | 'accessory' | 'makeup'
 let editingItemTags = []; // string[]
+let filterActiveOnly = false;
+let itemToDeleteId = null;
+
+// --- CHAT SPECIFIC STATE ---
+function getActiveItems(mode = currentMode) {
+    const stContext = typeof getContext === 'function' ? getContext() : null;
+    let entities = {};
+    let isStContext = false;
+    
+    if (stContext && stContext.chatMetadata) {
+        if (!stContext.chatMetadata[mode]) stContext.chatMetadata[mode] = {};
+        if (!stContext.chatMetadata[mode].entities) stContext.chatMetadata[mode].entities = {};
+        
+        // Migrate old char/user layout to entities if needed (only for clothes)
+        if (mode === 'clothes' && stContext.chatMetadata.clothes.char && !stContext.chatMetadata.clothes.entities[stContext.name2]) {
+             stContext.chatMetadata.clothes.entities[stContext.name2 || 'Character'] = stContext.chatMetadata.clothes.char;
+             delete stContext.chatMetadata.clothes.char;
+        }
+        if (mode === 'clothes' && stContext.chatMetadata.clothes.user && !stContext.chatMetadata.clothes.entities[stContext.name1]) {
+             stContext.chatMetadata.clothes.entities[stContext.name1 || 'User'] = stContext.chatMetadata.clothes.user;
+             delete stContext.chatMetadata.clothes.user;
+        }
+        
+        entities = stContext.chatMetadata[mode].entities;
+        isStContext = true;
+    } else {
+        // Global fallback
+        if (!clothesState[`activeEntities_${mode}`]) clothesState[`activeEntities_${mode}`] = {};
+        if (mode === 'clothes') {
+            if (clothesState.activeCharItemId) {
+                clothesState[`activeEntities_${mode}`]['Character'] = clothesState.activeCharItemId;
+                clothesState.activeCharItemId = null;
+            }
+            if (clothesState.activeUserItemId) {
+                clothesState[`activeEntities_${mode}`]['User'] = clothesState.activeUserItemId;
+                clothesState.activeUserItemId = null;
+            }
+        }
+        entities = clothesState[`activeEntities_${mode}`];
+    }
+    
+    // Migrate string to object if mode === 'clothes'
+    if (mode === 'clothes') {
+        let changed = false;
+        Object.keys(entities).forEach(name => {
+            if (typeof entities[name] === 'string') {
+                entities[name] = { outfit: entities[name] };
+                changed = true;
+            }
+        });
+        if (changed) {
+            if (isStContext && typeof stContext.saveMetadataDebounced === 'function') {
+                stContext.saveMetadataDebounced();
+            } else if (!isStContext) {
+                saveState();
+            }
+        }
+    }
+    
+    return entities;
+}
+
+function setActiveItem(entityName, id, mode = currentMode, subCategory = 'outfit') {
+    const stContext = typeof getContext === 'function' ? getContext() : null;
+    let entitiesObj = null;
+    let isStContext = false;
+    
+    if (stContext && stContext.chatMetadata) {
+        if (!stContext.chatMetadata[mode]) stContext.chatMetadata[mode] = {};
+        if (!stContext.chatMetadata[mode].entities) stContext.chatMetadata[mode].entities = {};
+        entitiesObj = stContext.chatMetadata[mode].entities;
+        isStContext = true;
+    } else {
+        if (!clothesState[`activeEntities_${mode}`]) clothesState[`activeEntities_${mode}`] = {};
+        entitiesObj = clothesState[`activeEntities_${mode}`];
+    }
+    
+    if (mode === 'clothes') {
+        if (!entitiesObj[entityName] || typeof entitiesObj[entityName] === 'string') {
+            entitiesObj[entityName] = {};
+        }
+        if (id) {
+            entitiesObj[entityName][subCategory] = id;
+        } else {
+            delete entitiesObj[entityName][subCategory];
+            if (Object.keys(entitiesObj[entityName]).length === 0) {
+                delete entitiesObj[entityName];
+            }
+        }
+    } else {
+        // locations
+        if (id) {
+            entitiesObj[entityName] = id;
+        } else {
+            delete entitiesObj[entityName];
+        }
+    }
+    
+    if (isStContext) {
+        if (typeof stContext.saveMetadataDebounced === 'function') stContext.saveMetadataDebounced();
+    } else {
+        saveState();
+    }
+}
+
+function getActiveTagFilter(entityName, mode = currentMode) {
+    const stContext = typeof getContext === 'function' ? getContext() : null;
+    if (stContext && stContext.chatMetadata && stContext.chatMetadata[mode] && stContext.chatMetadata[mode].tagFilters) {
+        return stContext.chatMetadata[mode].tagFilters[entityName] || null;
+    }
+    return clothesState[`activeTagFilters_${mode}`] ? clothesState[`activeTagFilters_${mode}`][entityName] || null : null;
+}
+
+function setActiveTagFilter(entityName, tag, mode = currentMode) {
+    const stContext = typeof getContext === 'function' ? getContext() : null;
+    if (stContext && stContext.chatMetadata) {
+        if (!stContext.chatMetadata[mode]) stContext.chatMetadata[mode] = {};
+        if (!stContext.chatMetadata[mode].tagFilters) stContext.chatMetadata[mode].tagFilters = {};
+        
+        if (tag) {
+            stContext.chatMetadata[mode].tagFilters[entityName] = tag;
+        } else {
+            delete stContext.chatMetadata[mode].tagFilters[entityName];
+        }
+        if (typeof stContext.saveMetadataDebounced === 'function') stContext.saveMetadataDebounced();
+    } else {
+        if (!clothesState[`activeTagFilters_${mode}`]) clothesState[`activeTagFilters_${mode}`] = {};
+        if (tag) {
+            clothesState[`activeTagFilters_${mode}`][entityName] = tag;
+        } else {
+            delete clothesState[`activeTagFilters_${mode}`][entityName];
+        }
+        saveState();
+    }
+}
 
 // --- STSCRIPT INTEGRATION ---
 function updateSTScriptVariables() {
@@ -112,34 +161,11 @@ function updateSTScriptVariables() {
     const userName = stContext && stContext.name1 ? stContext.name1 : "User";
     const charName = stContext && stContext.name2 ? stContext.name2 : "Character";
 
-    const activeItems = getActiveItems();
-
-    let userItemText = "";
-    let charItemText = "";
-
-    Object.keys(activeItems).forEach(entityName => {
-        const itemId = activeItems[entityName];
-        const item = clothesState.items.find(i => i.id === itemId);
-        if (item) {
-            let text = `${entityName}'s Outfit: ${item.name}`;
-            if (item.tags && item.tags.length > 0) text += " (" + item.tags.join(", ") + ")";
-            if (item.description) text += "\n" + item.description;
-
-            if (entityName === userName) {
-                userItemText = text;
-            } else {
-                if (charItemText) charItemText += "\n\n";
-                charItemText += text;
-            }
-        }
-    });
-
-    const trySet = () => {
+    const trySet = (key, val) => {
         try {
             const stContext = getContext();
             if (stContext && stContext.variables && stContext.variables.global && typeof stContext.variables.global.set === 'function') {
-                stContext.variables.global.set('clothes_user', userItemText);
-                stContext.variables.global.set('clothes_char', charItemText);
+                stContext.variables.global.set(key, val);
                 return true;
             }
         } catch (e) {
@@ -148,12 +174,72 @@ function updateSTScriptVariables() {
         return false;
     };
 
-    if (!trySet()) {
-        const iv = setInterval(() => {
-            if (trySet()) clearInterval(iv);
-        }, 500);
-        setTimeout(() => clearInterval(iv), 5000);
-    }
+    const doRetrySet = (key, val) => {
+        if (!trySet(key, val)) {
+            const iv = setInterval(() => {
+                if (trySet(key, val)) clearInterval(iv);
+            }, 500);
+            setTimeout(() => clearInterval(iv), 5000);
+        }
+    };
+
+    ['clothes', 'location'].forEach(mode => {
+        const activeItems = getActiveItems(mode);
+        let userText = "";
+        let charText = "";
+
+        Object.keys(activeItems).forEach(entityName => {
+            const itemObjOrId = activeItems[entityName];
+            const itemIds = mode === 'clothes' ? Object.values(itemObjOrId || {}) : [itemObjOrId];
+
+            itemIds.forEach(itemId => {
+                const item = clothesState.items.find(i => i.id === itemId);
+                if (item) {
+                    const subCatNames = { outfit: 'Outfit', hairstyle: 'Hairstyle', accessory: 'Accessories', makeup: 'Makeup' };
+                    const modeLabel = mode === 'location' ? 'Location' : (subCatNames[item.subCategory || 'outfit'] || 'Outfit');
+                    let text = `${entityName}'s ${modeLabel}: ${item.name}`;
+                    if (item.tags && item.tags.length > 0) text += " (" + item.tags.join(", ") + ")";
+                    if (item.description) text += "\n" + item.description;
+
+                    if (entityName === userName) {
+                        if (userText) userText += "\n\n";
+                        userText += text;
+                    } else {
+                        if (charText) charText += "\n\n";
+                        charText += text;
+                    }
+                }
+            });
+        });
+
+        doRetrySet(`${mode}_user`, userText);
+        doRetrySet(`${mode}_char`, charText);
+
+        // For locations: also set image variables when image injection mode is active
+        if (mode === 'location') {
+            const injectMode = localStorage.getItem('location_inject_mode') || 'text';
+            let userImg = '';
+            let charImg = '';
+
+            if (injectMode === 'image') {
+                Object.keys(activeItems).forEach(entityName => {
+                    const itemId = activeItems[entityName];
+                    const item = clothesState.items.find(i => i.id === itemId);
+                    if (item) {
+                        const img = (item.images && item.images.length > 0) ? item.images[0] : (item.imageBase64 || '');
+                        if (entityName === userName) {
+                            userImg = img;
+                        } else {
+                            charImg = img;
+                        }
+                    }
+                });
+            }
+
+            doRetrySet('location_user_image', userImg);
+            doRetrySet('location_char_image', charImg);
+        }
+    });
 }
 
 function generateId() {
@@ -213,8 +299,12 @@ function buildModal() {
         <div class="cl-flex-center">
             <div class="cl-flex-container">
                 <div class="cl-header">
-                    <h3><i class="fa-solid fa-shirt" style="margin-right:8px; color:var(--cl-accent);"></i>Clothes</h3>
+                    <div style="display:flex; gap:10px; align-items:center;">
+                        <button class="cl-mode-btn active" data-mode="clothes"><i class="fa-solid fa-shirt"></i> Clothes</button>
+                        <button class="cl-mode-btn" data-mode="location"><i class="fa-solid fa-map-location-dot"></i> Locations</button>
+                    </div>
                     <div style="display:flex; align-items:center;">
+                        <i class="fa-solid fa-eye-slash cl-settings-icon interactable" id="cl-btn-filter-active" title="Toggle Equipped Items Only" style="margin-right:15px; font-size:1.1em;"></i>
                         <i class="cl-settings-icon interactable" id="cl-btn-clear-all" title="Unequip All Outfits" style="margin-right:15px; display:inline-block; width:1.1em; height:1.1em; background-color:currentColor; -webkit-mask:url('https://img.icons8.ru/ios-filled/50/cancel-2.png') no-repeat center / contain; mask:url('https://img.icons8.ru/ios-filled/50/cancel-2.png') no-repeat center / contain;"></i>
                         <i class="fa-solid fa-gear cl-settings-icon interactable" id="cl-btn-settings" title="Settings"></i>
                         <i class="fa-solid fa-xmark cl-close" id="cl-btn-close"></i>
@@ -227,10 +317,21 @@ function buildModal() {
 
                 <!-- GALLERY VIEW -->
                 <div class="cl-content cl-view active" id="cl-view-gallery">
-                    <div class="cl-gallery-header">
-                        <select id="cl-folder-select" class="cl-select-field" style="max-width: 200px;">
-                            <option value="All">All Outfits</option>
-                        </select>
+                    <div class="cl-gallery-header" style="display:flex; gap:10px;">
+                        <div style="flex:1; min-width:0;">
+                            <select id="cl-folder-select" class="cl-select-field">
+                                <option value="All">All Outfits</option>
+                            </select>
+                        </div>
+                        <div id="cl-subcategory-wrapper" style="flex:1; min-width:0;">
+                            <select id="cl-subcategory-select" class="cl-select-field">
+                                <option value="all">All Categories</option>
+                                <option value="outfit">Outfit</option>
+                                <option value="hairstyle">Hairstyle</option>
+                                <option value="accessory">Accessories</option>
+                                <option value="makeup">Makeup</option>
+                            </select>
+                        </div>
                     </div>
                     <div class="cl-gallery-tags-filter" id="cl-gallery-tags-filter">
                         <!-- Filter tags will be rendered here -->
@@ -244,15 +345,22 @@ function buildModal() {
                 <div class="cl-content cl-view" id="cl-view-edit">
                     <button class="cl-btn cl-btn-secondary" id="cl-btn-back-gallery" style="margin-top:0; margin-bottom:15px; width:auto; padding: 8px 15px;"><i class="fa-solid fa-arrow-left"></i> Back</button>
 
-                    <div class="cl-image-uploader" id="cl-uploader-edit">
-                        <i class="fa-solid fa-image"></i>
-                        <span>Click to attach image</span>
-                        <input type="file" id="cl-file-edit" accept="image/*" style="display:none;">
-                        <img class="cl-image-preview" id="cl-preview-edit" src="">
-                        <div class="cl-image-clear" id="cl-clear-edit" title="Remove image"><i class="fa-solid fa-xmark"></i></div>
+                    <div class="cl-multi-image-grid" id="cl-multi-image-grid">
+                        <!-- slots rendered dynamically -->
+                    </div>
+                    <input type="file" id="cl-file-edit" accept="image/*" multiple style="display:none;">
+
+                    <div id="cl-edit-subcategory-wrapper" style="margin-bottom:15px;">
+                        <span class="cl-label" id="cl-edit-label-subcategory" style="margin-top:0;">Category</span>
+                        <select id="cl-subcategory-edit" class="cl-select-field">
+                            <option value="outfit">Outfit</option>
+                            <option value="hairstyle">Hairstyle</option>
+                            <option value="accessory">Accessories</option>
+                            <option value="makeup">Makeup</option>
+                        </select>
                     </div>
 
-                    <span class="cl-label">Outfit Name</span>
+                    <span class="cl-label" id="cl-edit-label-name" style="margin-top:0;">Name</span>
                     <input type="text" id="cl-name-edit" class="cl-input-field" placeholder="E.g., Casual Dress">
 
                     <span class="cl-label">Tags (Press Enter or + to add)</span>
@@ -263,42 +371,81 @@ function buildModal() {
                     <div class="cl-tags-container" id="cl-tags-list-edit"></div>
                     <div class="cl-suggested-tags" id="cl-tags-suggested-edit"></div>
 
-                    <span class="cl-label">Outfit Description (Context)</span>
+                    <span class="cl-label" id="cl-edit-label-desc">Outfit Description (Context)</span>
                     <textarea id="cl-desc-edit" class="cl-input-field" style="resize:vertical; min-height:80px;" placeholder="AI will describe the outfit here, or write manually..."></textarea>
 
-                    <button class="cl-btn" id="cl-btn-describe-edit"><i class="fa-solid fa-wand-magic-sparkles"></i> Describe with AI</button>
+                    <button class="cl-btn" id="cl-btn-describe-edit" title="Hold or Right-Click to add an OOC note"><i class="fa-solid fa-wand-magic-sparkles"></i> Describe with AI</button>
                     <button class="cl-btn cl-btn-secondary" id="cl-btn-save-edit" style="margin-top: 10px;"><i class="fa-solid fa-floppy-disk"></i> Save Changes</button>
                 </div>
 
                 <!-- SETTINGS PANE -->
                 <div class="cl-content cl-view" id="cl-view-settings">
-                    <span class="cl-label" style="margin-top:0;">Theme</span>
-                    <select id="cl-setting-theme" class="cl-select-field">
-                        <option value="blue">Blue (Default)</option>
-                        <option value="grey">Grey</option>
-                        <option value="rose">Rose</option>
-                        <option value="emerald">Emerald</option>
-                        <option value="auto">Tavern Auto</option>
-                    </select>
+                    <div style="margin-bottom: 15px;">
+                        <span class="cl-label" style="margin-top:0;">Theme</span>
+                        <select id="cl-setting-theme" class="cl-select-field">
+                            <option value="blue">Blue (Default)</option>
+                            <option value="grey">Grey</option>
+                            <option value="rose">Rose</option>
+                            <option value="emerald">Emerald</option>
+                            <option value="auto">Tavern Auto</option>
+                        </select>
+                    </div>
 
-                    <span class="cl-label">AI Description Prompt</span>
-                    <select id="cl-setting-prompt" class="cl-select-field">
-                        <option value="brief">Brief (Default)</option>
-                        <option value="detailed">Detailed</option>
-                    </select>
+                    <div style="display:flex; gap:15px; margin-bottom:15px;">
+                        <div style="flex:1;">
+                            <span class="cl-label" style="margin-top:0;">Clothes Prompt</span>
+                            <select id="cl-setting-prompt" class="cl-select-field">
+                                <option value="brief">Brief</option>
+                                <option value="detailed">Detailed</option>
+                            </select>
+                        </div>
+                        <div style="flex:1;">
+                            <span class="cl-label" style="margin-top:0;">Locations Prompt</span>
+                            <select id="cl-setting-loc-prompt" class="cl-select-field">
+                                <option value="brief">Brief</option>
+                                <option value="detailed">Detailed</option>
+                            </select>
+                        </div>
+                    </div>
 
-                    <span class="cl-label">Grid Columns (Mobile)</span>
-                    <select id="cl-setting-grid" class="cl-select-field">
-                        <option value="auto">Auto (Responsive)</option>
-                        <option value="2">2 Columns</option>
-                        <option value="3">3 Columns</option>
-                    </select>
+                    <div style="margin-bottom: 15px;">
+                        <span class="cl-label">Grid Columns (Mobile)</span>
+                        <select id="cl-setting-grid" class="cl-select-field">
+                            <option value="auto">Auto (Responsive)</option>
+                            <option value="2">2 Columns</option>
+                            <option value="3">3 Columns</option>
+                        </select>
+                    </div>
 
-                    <span class="cl-label">Context Depth</span>
-                    <input type="number" id="cl-setting-depth" class="cl-input-field" value="0" min="0" max="999">
+                    <div style="display:flex; gap:15px; margin-bottom:15px;">
+                        <div style="flex:1;">
+                            <span class="cl-label" style="margin-top:0;">Clothes Depth</span>
+                            <input type="number" id="cl-setting-depth" class="cl-input-field" value="0" min="0" max="999">
+                        </div>
+                        <div style="flex:1;">
+                            <span class="cl-label" style="margin-top:0;">Locations Depth</span>
+                            <input type="number" id="cl-setting-loc-depth" class="cl-input-field" value="0" min="0" max="999">
+                        </div>
+                    </div>
 
-                    <span class="cl-label">AI Description Max Tokens</span>
-                    <input type="number" id="cl-setting-max-tokens" class="cl-input-field" value="4000" min="10" max="100000">
+                    <div style="display:flex; gap:15px; margin-bottom:15px;">
+                        <div style="flex:1;">
+                            <span class="cl-label" style="margin-top:0;">Clothes Max Tokens</span>
+                            <input type="number" id="cl-setting-max-tokens" class="cl-input-field" value="4000" min="10" max="100000">
+                        </div>
+                        <div style="flex:1;">
+                            <span class="cl-label" style="margin-top:0;">Locations Max Tokens</span>
+                            <input type="number" id="cl-setting-loc-max-tokens" class="cl-input-field" value="4000" min="10" max="100000">
+                        </div>
+                    </div>
+
+                    <div style="margin-bottom: 15px;">
+                        <span class="cl-label">Location Injection Mode</span>
+                        <select id="cl-setting-loc-inject" class="cl-select-field">
+                            <option value="text">Text Description</option>
+                            <option value="image">Image Attachment (Multimodal)</option>
+                        </select>
+                    </div>
 
                     <label class="cl-checkbox-wrapper" style="margin-top: 15px;">
                         <input type="checkbox" id="cl-setting-quick-icon" class="cl-checkbox">
@@ -320,6 +467,31 @@ function buildModal() {
                     <button class="cl-btn" id="cl-btn-save-settings"><i class="fa-solid fa-check"></i> Save Settings</button>
                 </div>
 
+            </div>
+        </div>
+
+        <!-- Custom OOC Modal -->
+        <div id="cl-custom-prompt-modal" class="cl-modal-overlay" style="display:none;">
+            <div class="cl-modal-box">
+                <h3 style="margin-top:0; color:#E5E7EB; font-size:1.1em;">Describe with AI</h3>
+                <p style="font-size:0.85em; color:#9CA3AF; margin-bottom:10px;">Add OOC instructions (optional):</p>
+                <textarea id="cl-custom-ooc-input" class="cl-input-field" style="min-height:80px; resize:vertical;" placeholder="E.g., It's a cyberpunk style, focus on neon colors..."></textarea>
+                <div style="display:flex; justify-content:center; gap:10px; margin-top:15px;">
+                    <button class="cl-btn cl-btn-secondary" id="cl-btn-cancel-ooc" style="flex:1; margin:0; padding:10px;">Cancel</button>
+                    <button class="cl-btn" id="cl-btn-generate-ooc" style="flex:1; margin:0; padding:10px;"><i class="fa-solid fa-wand-magic-sparkles"></i> Generate</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Custom Confirm Delete Modal -->
+        <div id="cl-custom-confirm-modal" class="cl-modal-overlay" style="display:none;">
+            <div class="cl-modal-box" style="max-width:300px; text-align:center;">
+                <h3 style="margin-top:0; color:#E5E7EB; font-size:1.1em;">Confirm Deletion</h3>
+                <p style="font-size:0.85em; color:#9CA3AF; margin-bottom:20px;">Are you sure you want to delete this item?</p>
+                <div style="display:flex; justify-content:center; gap:10px;">
+                    <button class="cl-btn cl-btn-secondary" id="cl-btn-cancel-delete" style="flex:1; margin:0; padding:10px;">Cancel</button>
+                    <button class="cl-btn cl-card-btn-del" id="cl-btn-confirm-delete" style="flex:1; margin:0; padding:10px; color:#fff;"><i class="fa-solid fa-trash"></i> Delete</button>
+                </div>
             </div>
         </div>
     </div>
@@ -474,19 +646,53 @@ function showView(viewName) {
 }
 
 function bindEvents() {
-    $('#cl-btn-clear-all').on('click', () => {
+    // Mode Switcher
+    $(document).on('click', '.cl-mode-btn', function() {
+        $('.cl-mode-btn').removeClass('active');
+        $(this).addClass('active');
+        currentMode = $(this).data('mode');
+        
+        // Update labels based on mode
+        if (currentMode === 'location') {
+            $('#cl-edit-label-name').text('Name');
+            $('#cl-edit-label-desc').text('Location Description (Context)');
+            $('#cl-folder-select option[value="All"]').text('All Locations');
+            $('#cl-subcategory-wrapper').hide();
+            $('#cl-edit-subcategory-wrapper').hide();
+        } else {
+            $('#cl-edit-label-name').text('Name');
+            $('#cl-edit-label-desc').text('Outfit Description (Context)');
+            $('#cl-folder-select option[value="All"]').text('All Outfits');
+            $('#cl-subcategory-wrapper').show();
+            $('#cl-edit-subcategory-wrapper').show();
+        }
+        
+        switchTab(currentEntity, currentType); // Re-renders gallery for current tab but new mode
+    });
+
+    $('#cl-btn-filter-active').on('click', function() {
+        filterActiveOnly = !filterActiveOnly;
+        if (filterActiveOnly) {
+            $(this).removeClass('fa-eye-slash').addClass('fa-eye').css('color', 'var(--cl-accent)');
+        } else {
+            $(this).removeClass('fa-eye').addClass('fa-eye-slash').css('color', '');
+        }
+        renderGallery();
+    });
+
+    $('#cl-btn-clear-all').on('click', async () => {
         const stContext = getContext();
-        if (stContext && stContext.chatMetadata && stContext.chatMetadata.clothes) {
-            stContext.chatMetadata.clothes.entities = {};
+        if (stContext && stContext.chatMetadata && stContext.chatMetadata[currentMode]) {
+            stContext.chatMetadata[currentMode].entities = {};
             if (typeof stContext.saveMetadataDebounced === 'function') stContext.saveMetadataDebounced();
         } else {
-            clothesState.activeEntities = {};
+            clothesState[`activeEntities_${currentMode}`] = {};
             saveState();
         }
         updateContext();
         updateSTScriptVariables();
         renderGallery();
-        toastr.success("All outfits unequipped for this chat");
+        toastr.success(`All ${currentMode === 'location' ? 'locations' : 'outfits'} unequipped for this chat`);
     });
 
     $('#cl-btn-close').on('click', () => {
@@ -509,6 +715,9 @@ function bindEvents() {
     $('#cl-setting-prompt').on('change', function() {
         localStorage.setItem('clothes_prompt', $(this).val());
     });
+    $('#cl-setting-loc-prompt').on('change', function() {
+        localStorage.setItem('location_prompt', $(this).val());
+    });
 
     $('#cl-setting-grid').on('change', function() {
         const val = $(this).val();
@@ -520,20 +729,36 @@ function bindEvents() {
         localStorage.setItem('clothes_depth', $(this).val());
         updateContext();
     });
+    $('#cl-setting-loc-depth').on('input change', function() {
+        localStorage.setItem('location_depth', $(this).val());
+        updateContext();
+    });
 
     $('#cl-setting-max-tokens').on('input change', function() {
         localStorage.setItem('clothes_max_tokens', $(this).val());
     });
+    $('#cl-setting-loc-max-tokens').on('input change', function() {
+        localStorage.setItem('location_max_tokens', $(this).val());
+    });
+
+    $('#cl-setting-loc-inject').on('change', function() {
+        localStorage.setItem('location_inject_mode', $(this).val());
+        updateContext();
+    });
 
     $('#cl-folder-select').on('change', function() {
         currentFolder = $(this).val();
-        setActiveTagFilter(currentEntity, null);
+        setActiveTagFilter(currentEntity, null, currentMode);
+        renderGallery();
+    });
+
+    $('#cl-subcategory-select').on('change', function() {
+        currentSubCategory = $(this).val();
+        setActiveTagFilter(currentEntity, null, currentMode);
         renderGallery();
     });
 
     $('#cl-btn-back-gallery').on('click', () => {
-        // Auto-save when going back
-        saveCurrentEdit();
         showView('gallery');
         renderGallery();
     });
@@ -580,45 +805,173 @@ function bindEvents() {
         toggleQuickIcon(isChecked);
     });
 
-    // Uploader logic
-    const $uploader = $('#cl-uploader-edit');
-    const $file = $('#cl-file-edit');
-    const $preview = $('#cl-preview-edit');
-    const $clear = $('#cl-clear-edit');
+    // Multi-image uploader logic
+    let editImages = window._clEditImages || []; // up to 4 base64 strings
+    let pendingSlotIndex = -1; // which slot triggered the file picker
 
-    $uploader.on('click', (e) => {
-        // Prevent infinite loops and don't trigger if clicking clear button
-        if ($(e.target).is('input[type="file"]') || $(e.target).closest('.cl-image-clear').length > 0) return;
-        $file.trigger('click');
+    // Bridge: openEditView sets window._clEditImages, then triggers cl-render-slots
+    $(document).on('cl-render-slots', () => {
+        editImages = window._clEditImages || [];
+        renderImageSlots();
+    });
+    // Also keep window._clEditImages in sync when editImages changes locally
+    function syncEditImages() {
+        window._clEditImages = editImages;
+    }
+
+    function renderImageSlots() {
+        const $grid = $('#cl-multi-image-grid');
+        $grid.empty();
+
+        // Always render exactly 4 fixed slots
+        for (let i = 0; i < 4; i++) {
+            const src = editImages[i] || '';
+            const hasImage = !!src;
+            const $slot = $(`
+                <div class="cl-img-slot ${hasImage ? 'has-image' : ''}" data-slot="${i}">
+                    ${hasImage ? `<img src="${src}" class="cl-slot-preview">` : '<i class="fa-solid fa-plus"></i>'}
+                    ${hasImage ? '<div class="cl-slot-clear" title="Remove"><i class="fa-solid fa-xmark"></i></div>' : ''}
+                </div>
+            `);
+            $grid.append($slot);
+        }
+    }
+
+    $(document).on('click', '.cl-img-slot', function(e) {
+        if ($(e.target).closest('.cl-slot-clear').length) return;
+        pendingSlotIndex = parseInt($(this).attr('data-slot'), 10);
+        $('#cl-file-edit').trigger('click');
     });
 
-    $file.on('change', function(e) {
-        const file = e.target.files[0];
-        if (!file) return;
-        const reader = new FileReader();
-        reader.onload = async (event) => {
-            $preview.attr('src', event.target.result).show();
-            $clear.show();
-            
-            // Compress image to save memory and storage
-            try {
-                const compressedUrl = await compressImage(event.target.result, 800, 800, 0.7);
-                $preview.attr('src', compressedUrl);
-            } catch (err) {
-                console.error("Clothes compression failed", err);
-            }
-        };
-        reader.readAsDataURL(file);
-        $(this).val(''); // Reset input so same file can be selected again
-    });
-
-    $clear.on('click', (e) => {
+    $(document).on('click', '.cl-slot-clear', function(e) {
         e.stopPropagation();
-        $preview.attr('src', '').hide();
-        $clear.hide();
+        const idx = parseInt($(this).closest('.cl-img-slot').attr('data-slot'), 10);
+        editImages.splice(idx, 1);
+        syncEditImages();
+        renderImageSlots();
     });
 
-    $('#cl-btn-describe-edit').on('click', () => describeImageEdit());
+    $('#cl-file-edit').on('change', async function(e) {
+        const files = Array.from(e.target.files || []);
+        if (!files.length) return;
+
+        // If clicking on a filled slot, replace just that one image
+        if (pendingSlotIndex >= 0 && pendingSlotIndex < editImages.length && files.length === 1) {
+            const reader = new FileReader();
+            reader.onload = async (event) => {
+                let result = event.target.result;
+                try { result = await compressImage(result, 800, 800, 0.7); } catch(err) {}
+                editImages[pendingSlotIndex] = result;
+                pendingSlotIndex = -1;
+                syncEditImages();
+                renderImageSlots();
+            };
+            reader.readAsDataURL(files[0]);
+        } else {
+            // Batch fill: start from pendingSlotIndex (or first empty slot)
+            let startIdx = (pendingSlotIndex >= 0 && pendingSlotIndex < 4) ? pendingSlotIndex : editImages.length;
+            for (const file of files) {
+                if (startIdx >= 4) break; // max 4
+                const dataUrl = await new Promise(resolve => {
+                    const r = new FileReader();
+                    r.onload = (ev) => resolve(ev.target.result);
+                    r.readAsDataURL(file);
+                });
+                let compressed = dataUrl;
+                try { compressed = await compressImage(dataUrl, 800, 800, 0.7); } catch(err) {}
+                if (startIdx < editImages.length) {
+                    editImages[startIdx] = compressed;
+                } else {
+                    editImages.push(compressed);
+                }
+                startIdx++;
+            }
+            pendingSlotIndex = -1;
+            syncEditImages();
+            renderImageSlots();
+        }
+        $(this).val('');
+    });
+
+    function openOOCModal() {
+        const existingOOC = $('#cl-btn-describe-edit').data('ooc') || '';
+        $('#cl-custom-ooc-input').val(existingOOC);
+        $('#cl-custom-prompt-modal').css('display', 'flex');
+        $('#cl-custom-ooc-input').focus();
+    }
+
+    $('#cl-btn-cancel-ooc').on('click', () => {
+        $('#cl-custom-prompt-modal').hide();
+    });
+
+    $('#cl-btn-generate-ooc').on('click', () => {
+        const ooc = $('#cl-custom-ooc-input').val();
+        $('#cl-btn-describe-edit').data('ooc', ooc);
+        $('#cl-custom-prompt-modal').hide();
+        describeImageEdit();
+    });
+
+    $('#cl-btn-cancel-delete').on('click', () => {
+        $('#cl-custom-confirm-modal').hide();
+        itemToDeleteId = null;
+    });
+
+    $('#cl-btn-confirm-delete').on('click', () => {
+        if (!itemToDeleteId) return;
+        const item = clothesState.items.find(i => i.id === itemToDeleteId);
+        if (!item) {
+            $('#cl-custom-confirm-modal').hide();
+            return;
+        }
+        
+        const activeItems = getActiveItems(currentMode);
+        Object.keys(activeItems).forEach(entity => {
+            if (currentMode === 'clothes') {
+                const subCat = item.subCategory || 'outfit';
+                if (activeItems[entity] && activeItems[entity][subCat] === item.id) {
+                    setActiveItem(entity, null, currentMode, subCat);
+                }
+            } else {
+                if (activeItems[entity] === item.id) setActiveItem(entity, null, currentMode);
+            }
+        });
+        
+        clothesState.items = clothesState.items.filter(i => i.id !== item.id);
+        saveState();
+        updateSTScriptVariables();
+        updateContext();
+        renderGallery();
+        $('#cl-custom-confirm-modal').hide();
+        itemToDeleteId = null;
+    });
+
+    let isDescribeLongPress = false;
+    let describePressTimer = null;
+
+    $('#cl-btn-describe-edit').on('mousedown touchstart', function(e) {
+        if (e.which === 3) return; // Ignore right click
+        isDescribeLongPress = false;
+        describePressTimer = setTimeout(() => {
+            isDescribeLongPress = true;
+            describePressTimer = null;
+            openOOCModal();
+        }, 600);
+    }).on('mouseup touchend mouseleave', function(e) {
+        if (describePressTimer) {
+            clearTimeout(describePressTimer);
+            describePressTimer = null;
+        }
+    }).on('click', function(e) {
+        if (isDescribeLongPress) {
+            e.preventDefault();
+            e.stopPropagation();
+            return;
+        }
+        describeImageEdit();
+    }).on('contextmenu', function(e) {
+        e.preventDefault();
+        openOOCModal();
+    });
 
     // API Profiles events
     $('#cl-api-profile-select').on('change', function() {
@@ -651,7 +1004,7 @@ function renderGallery() {
     const $grid = $('#cl-gallery-grid');
     $grid.empty();
 
-    const tabItems = clothesState.items.filter(item => item.type === currentType);
+    const tabItems = clothesState.items.filter(item => item.type === currentType && (item.category || 'clothes') === currentMode);
     
     // Manage Folders
     const folders = new Set();
@@ -660,7 +1013,7 @@ function renderGallery() {
     
     const $folderSelect = $('#cl-folder-select');
     $folderSelect.empty();
-    $folderSelect.append(`<option value="All">All Outfits</option>`);
+    $folderSelect.append(`<option value="All">All ${currentMode === 'location' ? 'Locations' : 'Outfits'}</option>`);
     Array.from(folders).sort().forEach(f => {
         $folderSelect.append(`<option value="${f}">${f}</option>`);
     });
@@ -680,9 +1033,14 @@ function renderGallery() {
         ? tabItems 
         : tabItems.filter(item => item.folder === currentFolder);
 
+    // Filter by SubCategory (if clothes mode)
+    const subCatItems = currentMode === 'clothes' && currentSubCategory !== 'all'
+        ? folderItems.filter(item => (item.subCategory || 'outfit') === currentSubCategory)
+        : folderItems;
+
     // Tags filtering UI
     const tagsSet = new Set();
-    folderItems.forEach(item => {
+    subCatItems.forEach(item => {
         if (item.tags && Array.isArray(item.tags)) {
             item.tags.forEach(t => tagsSet.add(t));
         }
@@ -691,10 +1049,10 @@ function renderGallery() {
     const $tagsFilterContainer = $('#cl-gallery-tags-filter');
     $tagsFilterContainer.empty();
     
-    let currentTagFilter = getActiveTagFilter(currentEntity);
+    let currentTagFilter = getActiveTagFilter(currentEntity, currentMode);
     
     if (currentTagFilter && !tagsSet.has(currentTagFilter)) {
-        setActiveTagFilter(currentEntity, null);
+        setActiveTagFilter(currentEntity, null, currentMode);
         currentTagFilter = null;
     }
     
@@ -709,40 +1067,83 @@ function renderGallery() {
         // Tag click handler
         $tagsFilterContainer.find('.cl-tag-chip').on('click', function() {
             const t = $(this).attr('data-tag');
-            setActiveTagFilter(currentEntity, t ? t : null);
+            setActiveTagFilter(currentEntity, t ? t : null, currentMode);
             renderGallery();
         });
     } else {
         $tagsFilterContainer.hide();
-        setActiveTagFilter(currentEntity, null);
+        setActiveTagFilter(currentEntity, null, currentMode);
         currentTagFilter = null;
     }
 
     // Filter Items by Tag
     const finalItems = currentTagFilter 
-        ? folderItems.filter(item => item.tags && item.tags.includes(currentTagFilter))
-        : folderItems;
+        ? subCatItems.filter(item => item.tags && item.tags.includes(currentTagFilter))
+        : subCatItems;
 
-    // Add New Card
-    $grid.append(`
-        <div class="cl-card cl-add-card" id="cl-grid-add">
-            <i class="fa-solid fa-plus"></i>
-            <span>Add New</span>
-        </div>
-    `);
-    $('#cl-grid-add').on('click', () => openEditView(null));
+    // Add New Card (only if not filtering active)
+    if (!filterActiveOnly) {
+        $grid.append(`
+            <div class="cl-card cl-add-card" id="cl-grid-add">
+                <i class="fa-solid fa-plus"></i>
+                <span>Add New</span>
+            </div>
+        `);
+        $('#cl-grid-add').on('click', () => openEditView(null));
+    }
 
-    finalItems.forEach(item => {
-        const activeItems = getActiveItems();
-        const isActive = activeItems[currentEntity] === item.id;
+    let displayItems = finalItems;
+
+    if (filterActiveOnly) {
+        const activeItems = getActiveItems(currentMode);
+        displayItems = tabItems.filter(item => {
+            if (currentMode === 'clothes') {
+                const subCat = item.subCategory || 'outfit';
+                return activeItems[currentEntity] && activeItems[currentEntity][subCat] === item.id;
+            } else {
+                return activeItems[currentEntity] === item.id;
+            }
+        });
         
-        const imgSrc = item.imageBase64 || 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+        $tagsFilterContainer.hide();
+        $('#cl-folder-select').parent().hide();
+        $('#cl-subcategory-wrapper').hide();
+    } else {
+        $('#cl-folder-select').parent().show();
+        if (currentMode === 'clothes') $('#cl-subcategory-wrapper').show();
+    }
+
+    displayItems.forEach(item => {
+        const activeItems = getActiveItems(currentMode);
+        let isActive = false;
+        if (currentMode === 'clothes') {
+            const subCat = item.subCategory || 'outfit';
+            isActive = activeItems[currentEntity] && activeItems[currentEntity][subCat] === item.id;
+        } else {
+            isActive = activeItems[currentEntity] === item.id;
+        }
+        
+        const images = item.images && item.images.length > 0 ? item.images : (item.imageBase64 ? [item.imageBase64] : []);
+        const imgCount = images.length;
+        const placeholder = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+        
+        let cardImgHtml = '';
+        if (imgCount <= 1) {
+            cardImgHtml = `<img class="cl-card-img" src="${images[0] || placeholder}">`;
+        } else {
+            cardImgHtml = `<div class="cl-card-img-collage cl-collage-${imgCount}">`;
+            images.forEach(src => { cardImgHtml += `<img class="cl-card-img-cell" src="${src}">`; });
+            cardImgHtml += '</div>';
+        }
+        
+        const subCatNames = { outfit: 'Outfit', hairstyle: 'Hairstyle', accessory: 'Accessory', makeup: 'Makeup' };
+        const fallbackName = item.category === 'location' ? 'Location' : (subCatNames[item.subCategory || 'outfit'] || 'Outfit');
         
         const $card = $(`
             <div class="cl-card ${isActive ? 'active-item' : ''}" data-id="${item.id}">
-                <img class="cl-card-img" src="${imgSrc}">
+                ${cardImgHtml}
                 <div class="cl-card-info">
-                    <div class="cl-card-title" title="${item.name}">${item.name || 'Unnamed'}</div>
+                    <div class="cl-card-title" title="${item.name}">${item.name || fallbackName}</div>
                 </div>
                 <div class="cl-card-actions">
                     <button class="cl-card-btn cl-btn-edit"><i class="fa-solid fa-pen"></i></button>
@@ -754,16 +1155,26 @@ function renderGallery() {
         // Click to select
         $card.on('click', (e) => {
             if ($(e.target).closest('.cl-card-actions').length) return; // Ignore if clicking buttons
-            const activeItems = getActiveItems();
-            setActiveItem(currentEntity, activeItems[currentEntity] === item.id ? null : item.id);
+            const activeItems = getActiveItems(currentMode);
+            if (currentMode === 'clothes') {
+                const subCat = item.subCategory || 'outfit';
+                const currentlyActive = activeItems[currentEntity] && activeItems[currentEntity][subCat] === item.id;
+                setActiveItem(currentEntity, currentlyActive ? null : item.id, currentMode, subCat);
+            } else {
+                setActiveItem(currentEntity, activeItems[currentEntity] === item.id ? null : item.id, currentMode);
+            }
             updateContext();
             updateSTScriptVariables();
             
             // Update visually without rebuilding the DOM to prevent scroll jumps
             $('#cl-gallery-grid .cl-card').removeClass('active-item');
-            const newActive = getActiveItems()[currentEntity];
-            if (newActive) {
-                $(`#cl-gallery-grid .cl-card[data-id="${newActive}"]`).addClass('active-item');
+            const newActiveItems = getActiveItems(currentMode)[currentEntity];
+            if (currentMode === 'clothes' && newActiveItems) {
+                Object.values(newActiveItems).forEach(id => {
+                    $(`#cl-gallery-grid .cl-card[data-id="${id}"]`).addClass('active-item');
+                });
+            } else if (newActiveItems) {
+                $(`#cl-gallery-grid .cl-card[data-id="${newActiveItems}"]`).addClass('active-item');
             }
         });
 
@@ -774,23 +1185,10 @@ function renderGallery() {
         });
 
         // Delete
-        $card.find('.cl-btn-del').on('click', async (e) => {
+        $card.find('.cl-btn-del').on('click', (e) => {
             e.stopPropagation();
-            const { Popup, POPUP_RESULT } = getContext();
-            const result = await Popup.show.confirm("Delete this outfit?", "Confirm Deletion");
-            if (result === POPUP_RESULT.AFFIRMATIVE) {
-                const activeItems = getActiveItems();
-                // Unequip from anyone currently wearing it
-                Object.keys(activeItems).forEach(entity => {
-                    if (activeItems[entity] === item.id) setActiveItem(entity, null);
-                });
-                
-                clothesState.items = clothesState.items.filter(i => i.id !== item.id);
-                saveState();
-                updateSTScriptVariables();
-                updateContext();
-                renderGallery();
-            }
+            itemToDeleteId = item.id;
+            $('#cl-custom-confirm-modal').css('display', 'flex');
         });
 
         $grid.append($card);
@@ -802,35 +1200,40 @@ function openEditView(itemId) {
     editingItemId = itemId;
     editingItemTags = [];
     const stContext = getContext();
+    $('#cl-btn-describe-edit').removeData('ooc');
+    
+    // Access editImages from the closure via the binding scope
+    const getEditImages = () => { try { return window._clEditImages; } catch(e) { return []; } };
     
     if (itemId) {
         const item = clothesState.items.find(i => i.id === itemId);
         if (item) {
             $('#cl-name-edit').val(item.name || '');
             $('#cl-desc-edit').val(item.description || '');
+            $('#cl-subcategory-edit').val(item.subCategory || 'outfit').trigger('change');
             if (item.tags && Array.isArray(item.tags)) {
                 editingItemTags = [...item.tags];
             }
-            if (item.imageBase64) {
-                $('#cl-preview-edit').attr('src', item.imageBase64).show();
-                $('#cl-clear-edit').show();
-            } else {
-                $('#cl-preview-edit').attr('src', '').hide();
-                $('#cl-clear-edit').hide();
-            }
+            // Multi-image: populate editImages
+            window._clEditImages = item.images && item.images.length > 0 
+                ? [...item.images] 
+                : (item.imageBase64 ? [item.imageBase64] : []);
         }
     } else {
         // New item
         $('#cl-name-edit').val('');
         $('#cl-desc-edit').val('');
-        
-        $('#cl-preview-edit').attr('src', '').hide();
-        $('#cl-clear-edit').hide();
+        window._clEditImages = [];
     }
     
     $('#cl-tags-input-edit').val('');
     renderEditTags();
     showView('edit');
+    // Render image slots after view is shown
+    if (typeof renderImageSlots === 'undefined') {
+        // renderImageSlots is inside bindEvents closure — we bridge via a custom event
+        $(document).trigger('cl-render-slots');
+    }
 }
 
 function renderEditTags() {
@@ -870,19 +1273,33 @@ function saveCurrentEdit() {
     
     const name = $('#cl-name-edit').val().trim();
     const desc = $('#cl-desc-edit').val().trim();
-    const b64 = $('#cl-preview-edit').is(':visible') ? $('#cl-preview-edit').attr('src') : '';
+    const imgs = (window._clEditImages || []).filter(Boolean);
 
-    if (!name && !desc && !b64) {
+    if (!name && !desc && imgs.length === 0) {
         // Empty, don't save new
         if (!editingItemId) return;
+    }
+
+    const subCategory = $('#cl-subcategory-edit').val();
+
+    let defaultName = '';
+    if (currentMode === 'location') {
+        const count = clothesState.items.filter(i => i.type === currentType && i.category === 'location').length;
+        defaultName = `Location ${editingItemId ? Math.max(1, count) : count + 1}`;
+    } else {
+        const count = clothesState.items.filter(i => i.type === currentType && i.category === 'clothes' && (i.subCategory || 'outfit') === subCategory).length;
+        const subCatNames = { outfit: 'Outfit', hairstyle: 'Hairstyle', accessory: 'Accessory', makeup: 'Makeup' };
+        defaultName = `${subCatNames[subCategory] || 'Outfit'} ${editingItemId ? Math.max(1, count) : count + 1}`;
     }
 
     if (editingItemId) {
         const item = clothesState.items.find(i => i.id === editingItemId);
         if (item) {
-            item.name = name;
+            item.name = name || defaultName;
             item.description = desc;
-            item.imageBase64 = b64;
+            item.images = imgs;
+            item.imageBase64 = imgs[0] || '';
+            item.subCategory = subCategory;
             item.tags = [...editingItemTags];
         }
     } else {
@@ -894,19 +1311,28 @@ function saveCurrentEdit() {
 
         const newItem = {
             id: generateId(),
+            category: currentMode,
             type: currentType,
             folder: folderName,
-            name: name || 'New Outfit',
+            subCategory: subCategory,
+            name: name || defaultName,
             description: desc,
-            imageBase64: b64,
+            images: imgs,
+            imageBase64: imgs[0] || '',
             tags: [...editingItemTags]
         };
         clothesState.items.push(newItem);
         editingItemId = newItem.id;
         
-        const activeItems = getActiveItems();
-        if (!activeItems[currentEntity]) {
-            setActiveItem(currentEntity, newItem.id);
+        const activeItems = getActiveItems(currentMode);
+        if (currentMode === 'clothes') {
+            if (!activeItems[currentEntity] || !activeItems[currentEntity][subCategory]) {
+                setActiveItem(currentEntity, newItem.id, currentMode, subCategory);
+            }
+        } else {
+            if (!activeItems[currentEntity]) {
+                setActiveItem(currentEntity, newItem.id, currentMode);
+            }
         }
     }
     
@@ -916,9 +1342,9 @@ function saveCurrentEdit() {
 }
 
 async function describeImageEdit() {
-    const b64data = $('#cl-preview-edit').is(':visible') ? $('#cl-preview-edit').attr('src') : '';
-    if (!b64data) {
-        toastr.warning("Please attach an image first.");
+    const allImages = (window._clEditImages || []).filter(Boolean);
+    if (allImages.length === 0) {
+        toastr.warning("Please attach at least one image first.");
         return;
     }
 
@@ -927,18 +1353,54 @@ async function describeImageEdit() {
     $btn.html('<i class="fa-solid fa-spinner fa-spin"></i> Describing...').prop('disabled', true);
 
     try {
-        const promptType = localStorage.getItem('clothes_prompt') || 'brief';
-        let prompt = "Please concisely describe the clothing and outfit worn by the main person in this image. Focus on style, colors, materials, and distinct accessories. Keep it under 5 sentences. Do not describe the person's physical features or background, ONLY the outfit.";
+        const promptType = localStorage.getItem(currentMode === 'location' ? 'location_prompt' : 'clothes_prompt') || 'brief';
+        const subCat = $('#cl-subcategory-edit').val() || 'outfit';
+        let prompt = "";
         
-        if (promptType === 'detailed') {
-            prompt = "Please provide a highly detailed, comprehensive breakdown of the clothing and outfit worn by the main person in this image. Describe every visible layer, including the style, cut, color, material, pattern, and any unique details (like buttons, stitching, or folds). Include all accessories such as jewelry, belts, hats, gloves, footwear, and any other wearable items. Do not describe the person's physical features, body shape, or background—focus strictly and exclusively on the garments and accessories. Provide your description in a single cohesive paragraph.";
+        const strictNegative = "\n\nCRITICAL RESTRICTION: DO NOT under ANY circumstances describe the person's physical features. DO NOT describe hair color, eye color, skin tone, moles, freckles, body shape, or age. Focus ONLY on the requested items.";
+        
+        if (currentMode === 'location') {
+            prompt = promptType === 'detailed' 
+                ? "Describe this location directly as if writing a scene description for a novel. Detail the architecture, geography, weather, lighting, mood, time of day, and any significant objects or elements. Do not describe any characters—focus strictly and exclusively on the surroundings and atmosphere. Write in a single cohesive paragraph. IMPORTANT: Begin your description directly with what the place is (e.g. 'A sprawling medieval courtyard...' or 'The dimly lit alleyway...'). NEVER start with 'This image shows', 'The image depicts', or any similar meta-commentary about an image."
+                : "Describe this location directly and concisely as if writing a scene description. Focus on architecture, nature, time of day, atmosphere, and key objects. Keep it under 5 sentences. Do not describe any characters. IMPORTANT: Begin directly with what the place is (e.g. 'A cozy café...'). NEVER start with 'This image', 'The image', or any meta-commentary about an image.";
+            prompt += strictNegative;
+        } else {
+            if (subCat === 'outfit') {
+                prompt = promptType === 'detailed'
+                    ? "Please provide a highly detailed, comprehensive breakdown of the clothing and outfit worn by the main person in this image. Describe every visible layer, including the style, cut, color, material, pattern, and any unique details. Include all clothing accessories. Do not describe the person's physical features or background—focus strictly and exclusively on the garments. Provide your description in a single cohesive paragraph."
+                    : "Please concisely describe the clothing and outfit worn by the main person in this image. Focus on style, colors, materials, and distinct clothing layers. Keep it under 5 sentences. Do not describe the person's physical features or background, ONLY the outfit.";
+                prompt += strictNegative;
+            } else if (subCat === 'hairstyle') {
+                // Always brief, 2-3 sentences
+                prompt = "Concisely describe the hairstyle: length, texture, styling, and any hair accessories. Keep it to 2-3 sentences. Do not describe the person's face, clothing, or background—ONLY the hair.";
+                prompt += strictNegative;
+            } else if (subCat === 'accessory') {
+                // Always brief, 2-3 sentences
+                prompt = "Concisely describe the accessories: jewelry, headwear, eyewear, bags, belts, gloves, or scarves. Note materials and colors. Keep it to 2-3 sentences. Do not describe clothing or the person—ONLY the accessories.";
+                prompt += strictNegative;
+            } else if (subCat === 'makeup') {
+                // Always brief, 2-3 sentences
+                prompt = "Concisely describe the makeup: eye makeup, lip color, and cosmetic styling. Keep it to 2-3 sentences. Do not describe natural features or clothing—ONLY the makeup.";
+                prompt += strictNegative;
+            }
         }
+
+        // Add multi-image context note
+        if (allImages.length > 1) {
+            prompt += `\n\nNOTE: ${allImages.length} images are attached. Consider ALL of them together as parts of the same ${currentMode === 'location' ? 'scene/location' : 'look/outfit'}. Combine the details from all images into a single unified description.`;
+        }
+
+        let ooc = $('#cl-btn-describe-edit').data('ooc');
+        if (ooc && ooc.trim()) {
+            prompt += `\n\n[User's OOC Instructions: ${ooc.trim()}]`;
+        }
+        
         
         let resultText = "";
 
         const stContext = getContext();
         if (!activeProfileName) {
-            resultText = await generateRaw({ prompt: prompt, systemPrompt: '', imageList: [b64data] });
+            resultText = await generateRaw({ prompt: prompt, systemPrompt: '', imageList: allImages });
             if (!resultText) throw new Error("API returned empty response.");
         } else {
             const profiles = stContext?.extensionSettings?.connectionManager?.profiles || [];
@@ -946,15 +1408,17 @@ async function describeImageEdit() {
             if (!profile) throw new Error(`Profile '${activeProfileName}' not found.`);
 
             const cc_source = profile.api || 'openai';
+            const contentParts = [{ type: 'text', text: prompt }];
+            allImages.forEach(imgB64 => {
+                contentParts.push({ type: 'image_url', image_url: { url: imgB64 } });
+            });
             const messages = [{
                 role: 'user', 
-                content: [
-                    { type: 'text', text: prompt },
-                    { type: 'image_url', image_url: { url: b64data } }
-                ]
+                content: contentParts
             }];
 
-            const maxTokens = parseInt(localStorage.getItem('clothes_max_tokens') || '4000', 10);
+            const maxTokensRaw = localStorage.getItem(currentMode === 'location' ? 'location_max_tokens' : 'clothes_max_tokens') || '4000';
+            const maxTokens = parseInt(maxTokensRaw, 10);
             let generate_data = {
                 'messages': messages,
                 'model': profile.model,
@@ -1146,33 +1610,55 @@ function loadState() {
     const promptSetting = localStorage.getItem('clothes_prompt') || 'brief';
     $('#cl-setting-prompt').val(promptSetting).trigger('change');
     
+    const locPrompt = localStorage.getItem('location_prompt') || 'brief';
+    $('#cl-setting-loc-prompt').val(locPrompt).trigger('change');
+    
     const grid = localStorage.getItem('clothes_grid') || 'auto';
     $('#cl-setting-grid').val(grid).trigger('change');
     
     const depth = localStorage.getItem('clothes_depth') || '0';
     $('#cl-setting-depth').val(depth);
     
+    const locDepth = localStorage.getItem('location_depth') || '0';
+    $('#cl-setting-loc-depth').val(locDepth);
+    
     const maxTokens = localStorage.getItem('clothes_max_tokens') || '4000';
     $('#cl-setting-max-tokens').val(maxTokens);
+    
+    const locMaxTokens = localStorage.getItem('location_max_tokens') || '4000';
+    $('#cl-setting-loc-max-tokens').val(locMaxTokens);
+    
+    const locInject = localStorage.getItem('location_inject_mode') || 'text';
+    $('#cl-setting-loc-inject').val(locInject).trigger('change');
     
     const showQuick = localStorage.getItem('clothes_quick_icon') === 'true';
     $('#cl-setting-quick-icon').prop('checked', showQuick);
     toggleQuickIcon(showQuick);
     
-    // One-time compression for any massive legacy items
+    // One-time migration: imageBase64 -> images[] + compression
     setTimeout(async () => {
         let changed = false;
         for (let item of clothesState.items) {
-            if (item.imageBase64 && item.imageBase64.length > 300000) { // ~300KB base64 check
-                try {
-                    item.imageBase64 = await compressImage(item.imageBase64, 800, 800, 0.7);
-                    changed = true;
-                } catch(e) {}
+            // Migrate single imageBase64 to images array
+            if (!item.images) {
+                item.images = item.imageBase64 ? [item.imageBase64] : [];
+                changed = true;
             }
+            // Compress any large images in the array
+            for (let idx = 0; idx < item.images.length; idx++) {
+                if (item.images[idx] && item.images[idx].length > 300000) {
+                    try {
+                        item.images[idx] = await compressImage(item.images[idx], 800, 800, 0.7);
+                        changed = true;
+                    } catch(e) {}
+                }
+            }
+            // Keep imageBase64 in sync as first image for backward compat
+            item.imageBase64 = item.images[0] || '';
         }
         if (changed) {
             saveState();
-            console.log("Clothes extension compressed old large images.");
+            console.log("Clothes extension migrated/compressed images.");
         }
     }, 2000);
 }
@@ -1217,30 +1703,121 @@ function updateContext() {
     const stContext = getContext();
     if (!stContext.extensionPrompts) stContext.extensionPrompts = {};
 
-    let contextStr = "";
-    const charName = stContext.name2 || "Character";
-    const userName = stContext.name1 || "User";
-
-    const activeItems = getActiveItems();
-
-    Object.keys(activeItems).forEach(entityName => {
-        const itemId = activeItems[entityName];
-        const item = clothesState.items.find(i => i.id === itemId);
-        if (item && item.description) {
-            let namePart = item.name ? ` (${item.name})` : '';
-            contextStr += `${entityName}'s Outfit${namePart}:\n${item.description}\n\n`;
-        }
+    // Do Clothes
+    let clothesContextStr = "";
+    const activeClothes = getActiveItems('clothes');
+    Object.keys(activeClothes).forEach(entityName => {
+        const itemIds = Object.values(activeClothes[entityName] || {});
+        itemIds.forEach(itemId => {
+            const item = clothesState.items.find(i => i.id === itemId);
+            if (item && item.description) {
+                const subCatNames = { outfit: 'Outfit', hairstyle: 'Hairstyle', accessory: 'Accessories', makeup: 'Makeup' };
+                const modeLabel = subCatNames[item.subCategory || 'outfit'] || 'Outfit';
+                let namePart = item.name ? ` (${item.name})` : '';
+                clothesContextStr += `${entityName}'s ${modeLabel}${namePart}:\n${item.description}\n\n`;
+            }
+        });
     });
 
-    contextStr = contextStr.trim();
-    
-    if (contextStr) {
+    clothesContextStr = clothesContextStr.trim();
+    if (clothesContextStr) {
         const depth = parseInt(localStorage.getItem('clothes_depth') || '0', 10);
-        // key, value, position (1 = IN_CHAT), depth
-        stContext.setExtensionPrompt('clothes', `[System Note: Current Clothing / Outfits]\n${contextStr}`, 1, depth);
+        stContext.setExtensionPrompt('clothes', `[System Note: Current Clothing / Outfits]\n${clothesContextStr}`, 1, depth);
     } else {
         delete stContext.extensionPrompts['clothes'];
     }
+
+    // Do Locations
+    let locContextStr = "";
+    const activeLocations = getActiveItems('location');
+    const injectMode = localStorage.getItem('location_inject_mode') || 'text';
+    
+    Object.keys(activeLocations).forEach(entityName => {
+        const itemId = activeLocations[entityName];
+        const item = clothesState.items.find(i => i.id === itemId);
+        if (item && item.description) {
+            // Always inject text description if available
+            let namePart = item.name ? ` (${item.name})` : '';
+            locContextStr += `${entityName}'s Location${namePart}:\n${item.description}\n\n`;
+        }
+    });
+
+    locContextStr = locContextStr.trim();
+    if (locContextStr) {
+        const depth = parseInt(localStorage.getItem('location_depth') || '0', 10);
+        stContext.setExtensionPrompt('clothes_locations', `[System Note: Current Locations]\n${locContextStr}`, 1, depth);
+    } else {
+        delete stContext.extensionPrompts['clothes_locations'];
+    }
+}
+
+// --- IMAGE INJECTION FOR MULTIMODAL ---
+function onChatCompletionPromptReady(eventData) {
+    const injectMode = localStorage.getItem('location_inject_mode') || 'text';
+    if (injectMode !== 'image') return;
+    
+    const { chat, dryRun } = eventData;
+    if (dryRun || !chat || !Array.isArray(chat)) return;
+    
+    const activeLocations = getActiveItems('location');
+    const imagesToInject = [];
+    
+    Object.keys(activeLocations).forEach(entityName => {
+        const itemId = activeLocations[entityName];
+        const item = clothesState.items.find(i => i.id === itemId);
+        const itemImages = item ? (item.images && item.images.length > 0 ? item.images : (item.imageBase64 ? [item.imageBase64] : [])) : [];
+        if (itemImages.length > 0) {
+            imagesToInject.push({ entityName, item, itemImages });
+        }
+    });
+    
+    if (imagesToInject.length === 0) return;
+    
+    // Find the last system message or first user message to attach images to
+    let targetIdx = -1;
+    for (let i = chat.length - 1; i >= 0; i--) {
+        if (chat[i].role === 'system') {
+            targetIdx = i;
+            break;
+        }
+    }
+    if (targetIdx === -1) {
+        // Fallback: find first user message
+        for (let i = 0; i < chat.length; i++) {
+            if (chat[i].role === 'user') {
+                targetIdx = i;
+                break;
+            }
+        }
+    }
+    if (targetIdx === -1) return;
+    
+    const msg = chat[targetIdx];
+    
+    // Convert content to array format if it's a string
+    if (typeof msg.content === 'string') {
+        msg.content = [{ type: 'text', text: msg.content }];
+    }
+    
+    // Append images
+    let totalInjected = 0;
+    imagesToInject.forEach(({ entityName, item, itemImages }) => {
+        itemImages.forEach(imgSrc => {
+            msg.content.push({
+                type: 'image_url',
+                image_url: { url: imgSrc, detail: 'low' }
+            });
+            totalInjected++;
+        });
+        // Add a text label
+        const namePart = item.name ? ` (${item.name})` : '';
+        msg.content.push({
+            type: 'text',
+            text: `[${entityName}'s current location${namePart}]`
+        });
+    });
+    
+    console.log(`${LOG_PREFIX} Injected ${imagesToInject.length} location image(s) into prompt`);
 }
 
 function initializeExtension() {
@@ -1255,7 +1832,92 @@ function initializeExtension() {
             updateContext();
             updateSTScriptVariables();
         });
+        
+        // Hook into prompt assembly to inject location images for multimodal
+        eventSource.on(event_types.CHAT_COMPLETION_PROMPT_READY, (eventData) => {
+            onChatCompletionPromptReady(eventData);
+        });
     }
+
+    // --- FETCH INTERCEPTOR ---
+    // Intercepts ALL chat-completion requests (including DreamAlbum's direct fetch)
+    // and injects location images when image injection mode is enabled.
+    const _originalFetch = window.fetch;
+    window.fetch = async function(url, options) {
+        if (typeof url === 'string' && url.includes('/api/backends/chat-completions/generate') && options?.body) {
+            try {
+                const injectMode = localStorage.getItem('location_inject_mode') || 'text';
+                if (injectMode === 'image') {
+                    const bodyObj = JSON.parse(options.body);
+                    if (bodyObj.messages && Array.isArray(bodyObj.messages)) {
+                        const injected = injectLocationImagesIntoMessages(bodyObj.messages);
+                        if (injected) {
+                            options = { ...options, body: JSON.stringify(bodyObj) };
+                            console.log(`${LOG_PREFIX} [fetch interceptor] Injected location images into external request`);
+                        }
+                    }
+                }
+            } catch (e) {
+                console.error(`${LOG_PREFIX} fetch interceptor error:`, e);
+            }
+        }
+        return _originalFetch.call(this, url, options);
+    };
+}
+
+/**
+ * Injects location images into a messages array (used by fetch interceptor).
+ * Returns true if images were injected.
+ */
+function injectLocationImagesIntoMessages(messages) {
+    const activeLocations = getActiveItems('location');
+    const imagesToInject = [];
+    
+    Object.keys(activeLocations).forEach(entityName => {
+        const itemId = activeLocations[entityName];
+        const item = clothesState.items.find(i => i.id === itemId);
+        const itemImages = item ? (item.images && item.images.length > 0 ? item.images : (item.imageBase64 ? [item.imageBase64] : [])) : [];
+        if (itemImages.length > 0) {
+            imagesToInject.push({ entityName, item, itemImages });
+        }
+    });
+    
+    if (imagesToInject.length === 0) return false;
+    
+    // Find the best target: last system message, or first user message
+    let targetIdx = -1;
+    for (let i = messages.length - 1; i >= 0; i--) {
+        if (messages[i].role === 'system') { targetIdx = i; break; }
+    }
+    if (targetIdx === -1) {
+        for (let i = 0; i < messages.length; i++) {
+            if (messages[i].role === 'user') { targetIdx = i; break; }
+        }
+    }
+    if (targetIdx === -1) return false;
+    
+    const msg = messages[targetIdx];
+    
+    // Convert content to array format if it's a string
+    if (typeof msg.content === 'string') {
+        msg.content = [{ type: 'text', text: msg.content }];
+    }
+    
+    imagesToInject.forEach(({ entityName, item, itemImages }) => {
+        itemImages.forEach(imgSrc => {
+            msg.content.push({
+                type: 'image_url',
+                image_url: { url: imgSrc, detail: 'low' }
+            });
+        });
+        const namePart = item.name ? ` (${item.name})` : '';
+        msg.content.push({
+            type: 'text',
+            text: `[${entityName}'s current location${namePart}]`
+        });
+    });
+    
+    return true;
 }
 
 $(document).ready(() => {

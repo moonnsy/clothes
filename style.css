@@ -56,16 +56,27 @@
 }
 .cl-header {
     display: flex; justify-content: space-between; align-items: center;
-    padding: 18px 22px;
+    padding: 12px 14px;
     background-color: var(--cl-bg-secondary);
     flex-shrink: 0;
     border-bottom: 1px solid var(--cl-border);
+    gap: 8px;
 }
 .cl-header h3 { margin: 0; font-size: 1.15em; font-weight: 600; color: #E5E7EB; letter-spacing: 0.5px; }
-.cl-close { cursor: pointer; font-size: 1.2em; color: #9CA3AF; transition: color 0.2s; }
+.cl-close { cursor: pointer; font-size: 1.2em; color: #9CA3AF; transition: color 0.2s; flex-shrink: 0; }
 .cl-close:hover { color: #fff; }
-.cl-settings-icon { cursor: pointer; font-size: 1.1em; color: #9CA3AF; transition: color 0.2s; margin-right: 15px; }
+.cl-settings-icon { cursor: pointer; font-size: 1.1em; color: #9CA3AF; transition: color 0.2s; margin-right: 10px; flex-shrink: 0; }
 .cl-settings-icon:hover { color: var(--cl-accent); }
+
+/* Mode Switcher */
+.cl-mode-btn {
+    background: transparent; border: none; color: #9CA3AF; font-size: 0.88em;
+    font-weight: 600; cursor: pointer; transition: 0.2s; padding: 5px 9px;
+    border-radius: 8px; display: inline-flex; align-items: center; gap: 5px;
+    white-space: nowrap;
+}
+.cl-mode-btn:hover { color: #E5E7EB; background: rgba(255,255,255,0.05); }
+.cl-mode-btn.active { color: var(--cl-accent); background: rgba(255,255,255,0.1); }
 
 /* Tabs */
 .cl-tabs {
@@ -225,14 +236,14 @@
 .cl-custom-select-wrapper.open .cl-custom-select-display { border-color: var(--cl-accent); border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
 .cl-custom-select-wrapper.open .cl-custom-select-display::after { transform: translateY(-50%) rotate(180deg); }
 .cl-custom-select-list {
-    position: absolute; top: 100%; left: 0; right: 0;
+    position: absolute; top: 100%; left: 0; min-width: 100%;
     background: var(--cl-bg-secondary); border: 1px solid var(--cl-accent); border-top: none;
     border-bottom-left-radius: 8px; border-bottom-right-radius: 8px; z-index: 1000;
-    display: none; max-height: 200px; overflow-y: auto;
+    display: none; max-height: 200px; overflow-y: auto; overflow-x: hidden;
     box-shadow: 0 10px 20px rgba(0,0,0,0.5);
     scrollbar-width: thin;
 }
-.cl-custom-select-option { padding: 10px 12px; font-size: 0.85em; color: #E5E7EB; cursor: pointer; transition: background 0.1s; }
+.cl-custom-select-option { padding: 10px 12px; font-size: 0.85em; color: #E5E7EB; cursor: pointer; transition: background 0.1s; white-space: nowrap; text-overflow: ellipsis; }
 .cl-custom-select-option:hover { background: rgba(255,255,255,0.05); color: var(--cl-accent); }
 .cl-custom-select-option.selected { background: var(--cl-accent); color: #000; font-weight: 600; }
 
@@ -316,3 +327,87 @@
 
 /* Wand Menu Style Override */
 #clothes-wand-item { color: var(--cl-accent); }
+
+/* Custom Modals */
+.cl-modal-overlay { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); z-index: 2000; display: flex; align-items: center; justify-content: center; border-radius: 12px; backdrop-filter: blur(2px); }
+.cl-modal-box { background: var(--cl-bg-secondary); border: 1px solid var(--cl-border); border-radius: 12px; padding: 20px; width: 90%; max-width: 400px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); }
+
+/* ==========================================
+   Multi-Image Edit Grid (always 4 slots, 2x2)
+   ========================================== */
+.cl-multi-image-grid {
+    display: grid !important;
+    grid-template-columns: 64px 64px !important;
+    grid-template-rows: 64px 64px !important;
+    gap: 6px !important;
+    margin: 0 auto 15px auto;
+    width: 134px !important;
+}
+
+.cl-img-slot {
+    width: 64px !important; height: 64px !important;
+    border: 2px dashed var(--cl-border);
+    border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer; color: #6B7280; background-color: var(--cl-bg-input);
+    transition: border-color 0.2s, color 0.2s;
+    position: relative; overflow: hidden;
+    box-sizing: border-box;
+}
+.cl-img-slot:hover { border-color: var(--cl-accent); color: var(--cl-accent); }
+.cl-img-slot i { font-size: 1em; pointer-events: none; margin: 0; }
+.cl-img-slot.has-image { border-style: solid; border-color: var(--cl-border); }
+
+.cl-slot-preview {
+    position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+    object-fit: cover; pointer-events: none;
+}
+.cl-slot-clear {
+    position: absolute; top: 3px; right: 3px;
+    background: rgba(0,0,0,0.7); color: #fff;
+    width: 18px; height: 18px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 9px; line-height: 1;
+    cursor: pointer; z-index: 5;
+    opacity: 0; transition: opacity 0.15s;
+}
+.cl-slot-clear i { font-size: 9px; margin: 0; pointer-events: none; }
+.cl-img-slot:hover .cl-slot-clear { opacity: 1; }
+.cl-slot-clear:hover { background: #ef4444; }
+
+/* ==========================================
+   Gallery Card Collage (adaptive by count)
+   ========================================== */
+.cl-card-img-collage {
+    width: 100%; height: 140px;
+    display: grid;
+    gap: 2px;
+    background-color: var(--cl-bg-secondary);
+    overflow: hidden;
+    border-radius: 8px 8px 0 0;
+}
+.cl-card-img-collage .cl-card-img-cell {
+    width: 100%; height: 100%; object-fit: cover;
+    display: block; min-height: 0; min-width: 0;
+}
+
+/* 2 images: side by side */
+.cl-collage-2 {
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: 1fr;
+}
+
+/* 3 images: big left + 2 stacked right */
+.cl-collage-3 {
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: 1fr 1fr;
+}
+.cl-collage-3 .cl-card-img-cell:first-child {
+    grid-row: 1 / -1;
+}
+
+/* 4 images: 2x2 */
+.cl-collage-4 {
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: 1fr 1fr;
+}
