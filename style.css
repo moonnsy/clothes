@@ -37,6 +37,7 @@
     height: 100dvh !important;
     background-color: rgba(10, 15, 20, 0.55) !important;
     z-index: 999999 !important;
+    -webkit-backdrop-filter: blur(35px);
     backdrop-filter: blur(35px);
     font-family: 'Inter', 'Segoe UI', sans-serif;
 }
@@ -227,6 +228,7 @@
     border-radius: 8px; color: #E5E7EB; padding: 10px 30px 10px 12px;
     font-size: 0.85em; cursor: pointer; transition: 0.2s;
     position: relative; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    backdrop-filter: blur(20px);
 }
 .cl-custom-select-display::after {
     content: ''; position: absolute; right: 12px; top: 50%; transform: translateY(-50%);
@@ -242,6 +244,13 @@
     display: none; max-height: 200px; overflow-y: auto; overflow-x: hidden;
     box-shadow: 0 10px 20px rgba(0,0,0,0.5);
     scrollbar-width: thin;
+    -webkit-backdrop-filter: blur(20px);
+    backdrop-filter: blur(20px);
+}
+[data-cl-theme="auto"] .cl-custom-select-list {
+    background-color: var(--cl-bg-primary) !important;
+    -webkit-backdrop-filter: blur(20px) !important;
+    backdrop-filter: blur(20px) !important;
 }
 .cl-custom-select-option { padding: 10px 12px; font-size: 0.85em; color: #E5E7EB; cursor: pointer; transition: background 0.1s; white-space: nowrap; text-overflow: ellipsis; }
 .cl-custom-select-option:hover { background: rgba(255,255,255,0.05); color: var(--cl-accent); }
