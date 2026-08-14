@@ -285,6 +285,36 @@
     opacity: 1;
 }
 
+/* Floating quick access button */
+#cl-quick-fab {
+    position: fixed;
+    width: 48px; height: 48px;
+    display: flex;
+    justify-content: center; align-items: center;
+    background: var(--cl-bg-secondary);
+    border: 2px solid var(--cl-accent);
+    border-radius: 50%;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+    color: var(--cl-accent);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    cursor: grab;
+    z-index: 999998;
+    transition: background 0.2s, border-color 0.2s, color 0.2s;
+    touch-action: none;
+    user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+}
+#cl-quick-fab:hover {
+    border-color: var(--cl-accent-hover);
+    color: var(--cl-accent-hover);
+}
+#cl-quick-fab-icon {
+    width: 24px; height: 24px;
+    -webkit-mask-size: 24px 24px;
+    mask-size: 24px 24px;
+    pointer-events: none;
+}
+
 /* Tags / Chips */
 .cl-tags-container {
     display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; margin-bottom: 8px;

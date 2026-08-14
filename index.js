@@ -447,11 +447,14 @@ function buildModal() {
                         </select>
                     </div>
 
-                    <label class="cl-checkbox-wrapper" style="margin-top: 15px;">
-                        <input type="checkbox" id="cl-setting-quick-icon" class="cl-checkbox">
-                        <div class="cl-checkbox-custom"></div>
-                        <span style="color:#E5E7EB; font-size:0.9em;">Show quick access icon near chat bar</span>
-                    </label>
+                    <div style="margin-top: 15px; margin-bottom: 15px;">
+                        <span class="cl-label">Quick Access Button</span>
+                        <select id="cl-setting-quick-icon" class="cl-select-field">
+                            <option value="off">Disabled</option>
+                            <option value="chatbar">Icon near chat bar</option>
+                            <option value="float">Floating button</option>
+                        </select>
+                    </div>
 
                     <hr style="border:0; border-top:1px solid rgba(255,255,255,0.05); margin:15px 0;">
 
@@ -800,9 +803,11 @@ function bindEvents() {
 
     // Settings
     $('#cl-setting-quick-icon').on('change', function() {
-        const isChecked = $(this).is(':checked');
-        localStorage.setItem('clothes_quick_icon', isChecked ? 'true' : 'false');
-        toggleQuickIcon(isChecked);
+        const mode = $(this).val() || 'off';
+        localStorage.setItem('clothes_quick_icon_mode', mode);
+        // Keep the legacy key in sync so older/other code paths still read something sane
+        localStorage.setItem('clothes_quick_icon', mode === 'off' ? 'false' : 'true');
+        applyQuickAccessMode(mode);
     });
 
     // Multi-image uploader logic
@@ -1631,9 +1636,8 @@ function loadState() {
     const locInject = localStorage.getItem('location_inject_mode') || 'text';
     $('#cl-setting-loc-inject').val(locInject).trigger('change');
     
-    const showQuick = localStorage.getItem('clothes_quick_icon') === 'true';
-    $('#cl-setting-quick-icon').prop('checked', showQuick);
-    toggleQuickIcon(showQuick);
+    const quickMode = getQuickAccessMode();
+    $('#cl-setting-quick-icon').val(quickMode).trigger('change');
     
     // One-time migration: imageBase64 -> images[] + compression
     setTimeout(async () => {
@@ -1675,6 +1679,19 @@ function saveState() {
     localStorage.setItem('clothes_state_v2', JSON.stringify(clothesState));
 }
 
+function getQuickAccessMode() {
+    const mode = localStorage.getItem('clothes_quick_icon_mode');
+    if (mode === 'off' || mode === 'chatbar' || mode === 'float') return mode;
+    // Migration from the old boolean-only setting
+    return localStorage.getItem('clothes_quick_icon') === 'true' ? 'chatbar' : 'off';
+}
+
+function applyQuickAccessMode(mode) {
+    if (!mode) mode = 'off';
+    toggleQuickIcon(mode === 'chatbar');
+    toggleQuickFab(mode === 'float');
+}
+
 function toggleQuickIcon(show) {
     if (show) {
         if ($('#cl-quick-icon').length === 0) {
@@ -1696,6 +1713,128 @@ function toggleQuickIcon(show) {
         }
     } else {
         $('#cl-quick-icon').remove();
+    }
+}
+
+function getClothesFabPos() {
+    let pos = { left: window.innerWidth - 80, top: window.innerHeight - 150 };
+    try {
+        const stored = localStorage.getItem('clothes_fab_pos');
+        if (stored) pos = JSON.parse(stored);
+    } catch (e) {}
+    return pos;
+}
+
+function placeClothesFab($fab) {
+    const pos = getClothesFabPos();
+    $fab.css({
+        left: Math.max(0, Math.min(pos.left, window.innerWidth - 48)) + 'px',
+        top: Math.max(0, Math.min(pos.top, window.innerHeight - 48)) + 'px',
+    });
+}
+
+function createClothesFab() {
+    if ($('#cl-quick-fab').length) return $('#cl-quick-fab');
+
+    $(`
+        <div id="cl-quick-fab" title="Clothes (drag to move)">
+            <i class="cl-custom-icon" id="cl-quick-fab-icon"></i>
+        </div>
+    `).appendTo('body');
+
+    const $fab = $('#cl-quick-fab');
+    placeClothesFab($fab);
+
+    const el = $fab[0];
+    let isDragging = false;
+    let wasDragged = false;
+    let startX, startY, initialLeft, initialTop;
+    let currentDx = 0, currentDy = 0;
+    let rafId = null;
+
+    const dragStart = (e) => {
+        if (e.type === 'mousedown' && e.button !== 0) return;
+        isDragging = false;
+        wasDragged = false;
+        const event = e.type.startsWith('touch') ? e.touches[0] : e;
+        startX = event.clientX; startY = event.clientY;
+        initialLeft = el.offsetLeft; initialTop = el.offsetTop;
+        currentDx = 0; currentDy = 0;
+        el.style.cursor = 'grabbing';
+    };
+
+    const dragMove = (e) => {
+        if (startX === undefined) return;
+        const event = e.type.startsWith('touch') ? e.touches[0] : e;
+        const dx = event.clientX - startX;
+        const dy = event.clientY - startY;
+
+        if (Math.abs(dx) > 5 || Math.abs(dy) > 5) {
+            isDragging = true;
+            wasDragged = true;
+        }
+
+        if (isDragging) {
+            if (e.cancelable) e.preventDefault();
+            const newLeft = Math.max(0, Math.min(initialLeft + dx, window.innerWidth - el.offsetWidth));
+            const newTop = Math.max(0, Math.min(initialTop + dy, window.innerHeight - el.offsetHeight));
+            currentDx = newLeft - initialLeft;
+            currentDy = newTop - initialTop;
+
+            if (rafId) cancelAnimationFrame(rafId);
+            rafId = requestAnimationFrame(() => {
+                el.style.transform = `translate3d(${currentDx}px, ${currentDy}px, 0)`;
+            });
+        }
+    };
+
+    const dragEnd = () => {
+        if (startX === undefined) return;
+        startX = undefined;
+        if (rafId) cancelAnimationFrame(rafId);
+        el.style.cursor = 'grab';
+
+        if (isDragging) {
+            el.style.transform = 'none';
+            el.style.left = (initialLeft + currentDx) + 'px';
+            el.style.top = (initialTop + currentDy) + 'px';
+            localStorage.setItem('clothes_fab_pos', JSON.stringify({ left: initialLeft + currentDx, top: initialTop + currentDy }));
+            isDragging = false;
+            setTimeout(() => { wasDragged = false; }, 300);
+        }
+    };
+
+    el.addEventListener('mousedown', dragStart, { passive: false });
+    el.addEventListener('touchstart', dragStart, { passive: false });
+    document.addEventListener('mousemove', dragMove, { passive: false });
+    document.addEventListener('touchmove', dragMove, { passive: false });
+    document.addEventListener('mouseup', dragEnd);
+    document.addEventListener('touchend', dragEnd);
+    document.addEventListener('touchcancel', dragEnd);
+    el.addEventListener('contextmenu', (e) => e.preventDefault());
+
+    el.addEventListener('click', (e) => {
+        if (isDragging || wasDragged) {
+            e.preventDefault();
+            e.stopPropagation();
+            wasDragged = false;
+            return;
+        }
+        $('#clothes-wand-item').trigger('click');
+    }, true);
+
+    $(window).on('resize.clfab', () => {
+        if ($fab.is(':visible')) placeClothesFab($fab);
+    });
+
+    return $fab;
+}
+
+function toggleQuickFab(show) {
+    if (show) {
+        createClothesFab().show();
+    } else {
+        $('#cl-quick-fab').hide();
     }
 }
 
