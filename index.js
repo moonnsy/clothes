@@ -124,30 +124,41 @@ function setActiveItem(entityName, id, mode = currentMode, subCategory = 'outfit
     }
 }
 
+function isMultiTagEnabled() {
+    return localStorage.getItem('clothes_multi_tag') === 'true';
+}
+
+// Stored value may be a legacy single-tag string or an array of tags; always hand back an array.
+function normalizeTagFilter(raw) {
+    if (Array.isArray(raw)) return raw.filter(t => t);
+    return raw ? [raw] : [];
+}
+
 function getActiveTagFilter(entityName, mode = currentMode) {
     const stContext = typeof getContext === 'function' ? getContext() : null;
     if (stContext && stContext.chatMetadata && stContext.chatMetadata[mode] && stContext.chatMetadata[mode].tagFilters) {
-        return stContext.chatMetadata[mode].tagFilters[entityName] || null;
+        return normalizeTagFilter(stContext.chatMetadata[mode].tagFilters[entityName]);
     }
-    return clothesState[`activeTagFilters_${mode}`] ? clothesState[`activeTagFilters_${mode}`][entityName] || null : null;
+    return clothesState[`activeTagFilters_${mode}`] ? normalizeTagFilter(clothesState[`activeTagFilters_${mode}`][entityName]) : [];
 }
 
-function setActiveTagFilter(entityName, tag, mode = currentMode) {
+function setActiveTagFilter(entityName, tags, mode = currentMode) {
+    const list = normalizeTagFilter(tags);
     const stContext = typeof getContext === 'function' ? getContext() : null;
     if (stContext && stContext.chatMetadata) {
         if (!stContext.chatMetadata[mode]) stContext.chatMetadata[mode] = {};
         if (!stContext.chatMetadata[mode].tagFilters) stContext.chatMetadata[mode].tagFilters = {};
-        
-        if (tag) {
-            stContext.chatMetadata[mode].tagFilters[entityName] = tag;
+
+        if (list.length) {
+            stContext.chatMetadata[mode].tagFilters[entityName] = list;
         } else {
             delete stContext.chatMetadata[mode].tagFilters[entityName];
         }
         if (typeof stContext.saveMetadataDebounced === 'function') stContext.saveMetadataDebounced();
     } else {
         if (!clothesState[`activeTagFilters_${mode}`]) clothesState[`activeTagFilters_${mode}`] = {};
-        if (tag) {
-            clothesState[`activeTagFilters_${mode}`][entityName] = tag;
+        if (list.length) {
+            clothesState[`activeTagFilters_${mode}`][entityName] = list;
         } else {
             delete clothesState[`activeTagFilters_${mode}`][entityName];
         }
@@ -447,7 +458,13 @@ function buildModal() {
                         </select>
                     </div>
 
-                    <div style="margin-top: 15px; margin-bottom: 15px;">
+                    <label class="cl-checkbox-wrapper" style="margin-top: 15px;">
+                        <input type="checkbox" id="cl-setting-multi-tag" class="cl-checkbox">
+                        <div class="cl-checkbox-custom"></div>
+                        <span style="color:#E5E7EB; font-size:0.9em;">Select multiple tags at once when filtering</span>
+                    </label>
+
+                    <div style="margin-bottom: 15px;">
                         <span class="cl-label">Quick Access Button</span>
                         <select id="cl-setting-quick-icon" class="cl-select-field">
                             <option value="off">Disabled</option>
@@ -802,6 +819,17 @@ function bindEvents() {
     }
 
     // Settings
+    $('#cl-setting-multi-tag').on('change', function() {
+        const isChecked = $(this).is(':checked');
+        localStorage.setItem('clothes_multi_tag', isChecked ? 'true' : 'false');
+        // Turning it off collapses any existing multi-selection down to one tag
+        if (!isChecked) {
+            const existing = getActiveTagFilter(currentEntity, currentMode);
+            if (existing.length > 1) setActiveTagFilter(currentEntity, existing.slice(0, 1), currentMode);
+        }
+        renderGallery();
+    });
+
     $('#cl-setting-quick-icon').on('change', function() {
         const mode = $(this).val() || 'off';
         localStorage.setItem('clothes_quick_icon_mode', mode);
@@ -1054,36 +1082,52 @@ function renderGallery() {
     const $tagsFilterContainer = $('#cl-gallery-tags-filter');
     $tagsFilterContainer.empty();
     
+    const multiTag = isMultiTagEnabled();
     let currentTagFilter = getActiveTagFilter(currentEntity, currentMode);
-    
-    if (currentTagFilter && !tagsSet.has(currentTagFilter)) {
-        setActiveTagFilter(currentEntity, null, currentMode);
-        currentTagFilter = null;
+
+    // Drop tags that no longer exist on any visible item
+    const prunedTagFilter = currentTagFilter.filter(t => tagsSet.has(t));
+    // Single-tag mode can only ever show one chip as active
+    const effectiveTagFilter = multiTag ? prunedTagFilter : prunedTagFilter.slice(0, 1);
+    if (effectiveTagFilter.length !== currentTagFilter.length) {
+        setActiveTagFilter(currentEntity, effectiveTagFilter, currentMode);
     }
-    
+    currentTagFilter = effectiveTagFilter;
+
     if (tagsSet.size > 0) {
         $tagsFilterContainer.show();
-        $tagsFilterContainer.append(`<div class="cl-tag-chip ${!currentTagFilter ? 'active' : ''}" data-tag="">All</div>`);
-        
+        $tagsFilterContainer.append(`<div class="cl-tag-chip ${!currentTagFilter.length ? 'active' : ''}" data-tag="">All</div>`);
+
         Array.from(tagsSet).sort().forEach(tag => {
-            $tagsFilterContainer.append(`<div class="cl-tag-chip ${currentTagFilter === tag ? 'active' : ''}" data-tag="${tag}">${tag}</div>`);
+            const isOn = currentTagFilter.includes(tag);
+            $tagsFilterContainer.append(`<div class="cl-tag-chip ${isOn ? 'active' : ''}" data-tag="${escapeHtml(tag)}">${escapeHtml(tag)}</div>`);
         });
 
         // Tag click handler
         $tagsFilterContainer.find('.cl-tag-chip').on('click', function() {
             const t = $(this).attr('data-tag');
-            setActiveTagFilter(currentEntity, t ? t : null, currentMode);
+            if (!t) {
+                // "All" always clears everything
+                setActiveTagFilter(currentEntity, [], currentMode);
+            } else if (multiTag) {
+                const next = currentTagFilter.includes(t)
+                    ? currentTagFilter.filter(x => x !== t)
+                    : currentTagFilter.concat([t]);
+                setActiveTagFilter(currentEntity, next, currentMode);
+            } else {
+                setActiveTagFilter(currentEntity, [t], currentMode);
+            }
             renderGallery();
         });
     } else {
         $tagsFilterContainer.hide();
-        setActiveTagFilter(currentEntity, null, currentMode);
-        currentTagFilter = null;
+        setActiveTagFilter(currentEntity, [], currentMode);
+        currentTagFilter = [];
     }
 
-    // Filter Items by Tag
-    const finalItems = currentTagFilter 
-        ? subCatItems.filter(item => item.tags && item.tags.includes(currentTagFilter))
+    // Filter Items by Tag (an item matches if it carries any of the selected tags)
+    const finalItems = currentTagFilter.length
+        ? subCatItems.filter(item => item.tags && item.tags.some(t => currentTagFilter.includes(t)))
         : subCatItems;
 
     // Add New Card (only if not filtering active)
@@ -1636,6 +1680,8 @@ function loadState() {
     const locInject = localStorage.getItem('location_inject_mode') || 'text';
     $('#cl-setting-loc-inject').val(locInject).trigger('change');
     
+    $('#cl-setting-multi-tag').prop('checked', isMultiTagEnabled());
+
     const quickMode = getQuickAccessMode();
     $('#cl-setting-quick-icon').val(quickMode).trigger('change');
     
