@@ -237,7 +237,7 @@ function updateSTScriptVariables() {
                     const itemId = activeItems[entityName];
                     const item = clothesState.items.find(i => i.id === itemId);
                     if (item) {
-                        const img = (item.images && item.images.length > 0) ? item.images[0] : (item.imageBase64 || '');
+                        const img = getItemImages(item)[0] || '';
                         if (entityName === userName) {
                             userImg = img;
                         } else {
@@ -280,6 +280,229 @@ function compressImage(dataUrl, maxWidth, maxHeight, quality = 0.8) {
         };
         img.src = dataUrl;
     });
+}
+
+// --- IMAGE STORAGE ON DISK ---
+// Images used to be kept inline as base64 data URLs, which meant every picture
+// ended up inside SillyTavern's settings.json (and localStorage). A wardrobe of
+// any size bloats that file until the page chokes on it. Images now go to
+// user/images/clothes/ and an item only remembers the path.
+const CL_IMAGE_FOLDER = 'clothes';
+const CL_UPLOAD_FORMATS = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp']);
+const clDataUrlCache = new Map();
+
+function isDataUrl(src) {
+    return typeof src === 'string' && src.startsWith('data:');
+}
+
+function parseDataUrl(dataUrl) {
+    const comma = dataUrl.indexOf(',');
+    if (comma === -1) throw new Error('Malformed data URL');
+    const head = dataUrl.slice(5, comma);
+    if (!head.includes('base64')) throw new Error('Only base64 data URLs are supported');
+    let format = (head.split(';')[0].split('/')[1] || 'png').toLowerCase();
+    if (format === 'jpeg') format = 'jpg';
+    return { format, base64: dataUrl.slice(comma + 1).trim() };
+}
+
+/** Reads an item's images regardless of which storage generation it came from. */
+function getItemImages(item) {
+    if (!item) return [];
+    if (item.images && item.images.length > 0) return item.images.filter(Boolean);
+    return item.imageBase64 ? [item.imageBase64] : [];
+}
+
+/** Writes one data URL into user/images/clothes/ and returns its path. */
+async function clUploadImage(dataUrl, prefix = 'item') {
+    let parsed = parseDataUrl(dataUrl);
+    if (!CL_UPLOAD_FORMATS.has(parsed.format)) {
+        // The server only accepts known media types, so re-encode anything exotic
+        parsed = parseDataUrl(await compressImage(dataUrl, 4096, 4096, 0.9));
+    }
+
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const filename = `${String(prefix).replace(/[^\w-]/g, '')}_${stamp}_${Math.random().toString(36).slice(2, 6)}`;
+
+    const stContext = getContext();
+    const headers = (stContext && typeof stContext.getRequestHeaders === 'function')
+        ? stContext.getRequestHeaders()
+        : { 'Content-Type': 'application/json' };
+
+    const res = await fetch('/api/images/upload', {
+        method: 'POST',
+        headers: headers,
+        body: JSON.stringify({
+            image: parsed.base64,
+            format: parsed.format,
+            ch_name: CL_IMAGE_FOLDER,
+            filename: filename,
+        }),
+    });
+
+    if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        throw new Error(text || `Upload failed: ${res.status}`);
+    }
+    const out = await res.json();
+    if (!out || !out.path) throw new Error('Upload returned no path');
+    return out.path;
+}
+
+/** Resolves a stored image (path or data URL) to a data URL, for vision APIs. */
+async function clImageToDataUrl(src) {
+    if (!src) return '';
+    if (isDataUrl(src)) return src;
+    if (clDataUrlCache.has(src)) return clDataUrlCache.get(src);
+    try {
+        const url = (src.startsWith('http') || src.startsWith('/')) ? src : '/' + src;
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const blob = await res.blob();
+        const dataUrl = await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result);
+            reader.onerror = () => reject(new Error('Could not read image file'));
+            reader.readAsDataURL(blob);
+        });
+        clDataUrlCache.set(src, dataUrl);
+        return dataUrl;
+    } catch (e) {
+        console.error(`${LOG_PREFIX} could not load image ${src}:`, e);
+        return '';
+    }
+}
+
+/** Resolves a list of stored images to data URLs, dropping any that fail. */
+async function clImagesToDataUrls(sources) {
+    const resolved = await Promise.all((sources || []).map(s => clImageToDataUrl(s)));
+    return resolved.filter(Boolean);
+}
+
+/** True if any item still points at this image. */
+function isImageReferenced(src) {
+    if (!src) return false;
+    return (clothesState.items || []).some(item => getItemImages(item).includes(src));
+}
+
+/**
+ * Best-effort removal of an image file we own. Never throws.
+ * Call this only after the state no longer references the file — anything still
+ * in use is left on disk.
+ */
+async function clDeleteImageFile(src) {
+    if (!src || isDataUrl(src)) return;
+    if (!src.includes(`/${CL_IMAGE_FOLDER}/`)) return; // not ours, leave it alone
+    if (isImageReferenced(src)) return; // still used by some item
+    try {
+        const stContext = getContext();
+        const headers = (stContext && typeof stContext.getRequestHeaders === 'function')
+            ? stContext.getRequestHeaders()
+            : { 'Content-Type': 'application/json' };
+        await fetch('/api/images/delete', {
+            method: 'POST',
+            headers: headers,
+            body: JSON.stringify({ path: src.replace(/^\//, '') }),
+        });
+        clDataUrlCache.delete(src);
+    } catch (e) {
+        console.error(`${LOG_PREFIX} could not delete image ${src}:`, e);
+    }
+}
+
+/** Uploads any inline data URLs in a list, keeping already-stored paths as-is. */
+async function clPersistImages(sources, prefix) {
+    const out = [];
+    for (const src of (sources || []).filter(Boolean)) {
+        if (!isDataUrl(src)) {
+            out.push(src);
+            continue;
+        }
+        try {
+            out.push(await clUploadImage(src, prefix));
+        } catch (e) {
+            console.error(`${LOG_PREFIX} upload failed, keeping image inline:`, e);
+            out.push(src); // Better a bloated setting than a lost picture
+        }
+    }
+    return out;
+}
+
+/** How much of the wardrobe is still sitting inline in the settings file. */
+function getInlineImageStats() {
+    let count = 0;
+    let bytes = 0;
+    (clothesState.items || []).forEach(item => {
+        getItemImages(item).forEach(src => {
+            if (isDataUrl(src)) {
+                count++;
+                bytes += Math.floor(src.length * 0.75); // base64 -> approximate raw bytes
+            }
+        });
+    });
+    return { count, bytes };
+}
+
+function updateStorageStatus() {
+    const $status = $('#cl-storage-status');
+    if (!$status.length) return;
+    const { count, bytes } = getInlineImageStats();
+    if (count === 0) {
+        $status.css('color', '').text('All images are stored on disk.');
+    } else {
+        $status.css('color', '#f59e0b').text(`${count} image(s) still embedded in settings — about ${formatBytes(bytes)}.`);
+    }
+}
+
+function formatBytes(bytes) {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/**
+ * Moves every inline image out of the settings file and onto disk.
+ * An image that fails to upload is left inline rather than dropped.
+ */
+async function migrateImagesToDisk(onProgress) {
+    const items = clothesState.items || [];
+    const total = getInlineImageStats().count;
+    let moved = 0;
+    let failed = 0;
+    let freed = 0;
+
+    for (const item of items) {
+        const images = getItemImages(item);
+        if (!images.length) continue;
+
+        const next = [];
+        for (const src of images) {
+            if (!isDataUrl(src)) {
+                next.push(src);
+                continue;
+            }
+            try {
+                const path = await clUploadImage(src, item.id);
+                freed += Math.floor(src.length * 0.75);
+                next.push(path);
+                moved++;
+            } catch (e) {
+                console.error(`${LOG_PREFIX} migration failed for item ${item.id}:`, e);
+                next.push(src);
+                failed++;
+            }
+            if (typeof onProgress === 'function') onProgress(moved + failed, total);
+        }
+
+        item.images = next;
+        item.imageBase64 = next[0] || '';
+    }
+
+    if (moved > 0) {
+        saveState();
+        updateSTScriptVariables();
+        updateContext();
+    }
+    return { moved, failed, freed, total };
 }
 
 // --- UI INJECTION ---
@@ -482,7 +705,17 @@ function buildModal() {
                     </div>
                     <button id="cl-btn-test-profile" class="cl-btn cl-btn-secondary" style="margin-top: 10px;">Test Connection</button>
                     <div id="cl-api-status" class="cl-status-text"></div>
-                    
+
+                    <hr style="border:0; border-top:1px solid rgba(255,255,255,0.05); margin:20px 0 15px 0;">
+
+                    <span class="cl-label">Image Storage</span>
+                    <p style="font-size:0.8em; color:#9CA3AF; margin:4px 0 10px 0; line-height:1.4;">
+                        New images are saved to <code>user/images/${CL_IMAGE_FOLDER}/</code>.
+                        Older ones may still be embedded in SillyTavern's settings file, which can make it huge and crash the page.
+                    </p>
+                    <div id="cl-storage-status" class="cl-status-text"></div>
+                    <button id="cl-btn-migrate-images" class="cl-btn cl-btn-secondary" style="margin-top: 10px;"><i class="fa-solid fa-hard-drive"></i> Move images to disk</button>
+
                     <hr style="border:0; border-top:1px solid rgba(255,255,255,0.05); margin:20px 0 15px 0;">
                     <button class="cl-btn" id="cl-btn-save-settings"><i class="fa-solid fa-check"></i> Save Settings</button>
                 </div>
@@ -724,6 +957,41 @@ function bindEvents() {
         $('.cl-tab-btn').removeClass('active'); // Settings is outside tabs
         showView('settings');
         loadProfiles();
+        updateStorageStatus();
+    });
+
+    $('#cl-btn-migrate-images').on('click', async function() {
+        const $btn = $(this);
+        if ($btn.prop('disabled')) return;
+
+        const pending = getInlineImageStats();
+        if (pending.count === 0) {
+            toastr.info('All images are already on disk.');
+            updateStorageStatus();
+            return;
+        }
+
+        const oldHtml = $btn.html();
+        $btn.prop('disabled', true).html('<i class="fa-solid fa-spinner fa-spin"></i> Moving...');
+        $('#cl-storage-status').text(`Moving 0 / ${pending.count}...`);
+
+        try {
+            const result = await migrateImagesToDisk((done, total) => {
+                $('#cl-storage-status').text(`Moving ${done} / ${total}...`);
+            });
+
+            if (result.failed > 0) {
+                toastr.warning(`Moved ${result.moved} image(s), ${result.failed} failed and stayed embedded. Check the console.`);
+            } else {
+                toastr.success(`Moved ${result.moved} image(s) to disk, freeing about ${formatBytes(result.freed)}.`);
+            }
+        } catch (e) {
+            console.error(LOG_PREFIX, e);
+            toastr.error('Could not move images: ' + e.message);
+        } finally {
+            $btn.prop('disabled', false).html(oldHtml);
+            updateStorageStatus();
+        }
     });
 
     $('#cl-setting-theme').on('change', function() {
@@ -783,11 +1051,22 @@ function bindEvents() {
         renderGallery();
     });
 
-    $('#cl-btn-save-edit').on('click', () => {
-        saveCurrentEdit();
-        toastr.success("Outfit saved!");
-        showView('gallery');
-        renderGallery();
+    $('#cl-btn-save-edit').on('click', async function() {
+        const $btn = $(this);
+        if ($btn.prop('disabled')) return;
+        const oldHtml = $btn.html();
+        $btn.prop('disabled', true).html('<i class="fa-solid fa-spinner fa-spin"></i> Saving...');
+        try {
+            await saveCurrentEdit();
+            toastr.success("Outfit saved!");
+            showView('gallery');
+            renderGallery();
+        } catch (e) {
+            console.error(LOG_PREFIX, e);
+            toastr.error("Failed to save: " + e.message);
+        } finally {
+            $btn.prop('disabled', false).html(oldHtml);
+        }
     });
 
     $('#cl-btn-save-settings').on('click', () => {
@@ -969,7 +1248,10 @@ function bindEvents() {
             }
         });
         
+        const orphanedImages = getItemImages(item);
+
         clothesState.items = clothesState.items.filter(i => i.id !== item.id);
+        orphanedImages.forEach(src => { clDeleteImageFile(src); });
         saveState();
         updateSTScriptVariables();
         updateContext();
@@ -1172,7 +1454,7 @@ function renderGallery() {
             isActive = activeItems[currentEntity] === item.id;
         }
         
-        const images = item.images && item.images.length > 0 ? item.images : (item.imageBase64 ? [item.imageBase64] : []);
+        const images = getItemImages(item);
         const imgCount = images.length;
         const placeholder = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
         
@@ -1264,9 +1546,7 @@ function openEditView(itemId) {
                 editingItemTags = [...item.tags];
             }
             // Multi-image: populate editImages
-            window._clEditImages = item.images && item.images.length > 0 
-                ? [...item.images] 
-                : (item.imageBase64 ? [item.imageBase64] : []);
+            window._clEditImages = [...getItemImages(item)];
         }
     } else {
         // New item
@@ -1317,17 +1597,28 @@ function renderEditTags() {
     });
 }
 
-function saveCurrentEdit() {
+async function saveCurrentEdit() {
     if (currentView !== 'edit') return;
-    
+
     const name = $('#cl-name-edit').val().trim();
     const desc = $('#cl-desc-edit').val().trim();
-    const imgs = (window._clEditImages || []).filter(Boolean);
+    const rawImgs = (window._clEditImages || []).filter(Boolean);
 
-    if (!name && !desc && imgs.length === 0) {
+    if (!name && !desc && rawImgs.length === 0) {
         // Empty, don't save new
         if (!editingItemId) return;
     }
+
+    // Anything the user just picked is still a data URL; park it on disk so it
+    // never reaches the settings file.
+    const previousImages = editingItemId ? getItemImages(clothesState.items.find(i => i.id === editingItemId)) : [];
+    const imgs = await clPersistImages(rawImgs, editingItemId || 'item');
+    const droppedImages = previousImages.filter(src => !imgs.includes(src));
+
+    // Keep the open editor pointing at the stored copies, so a second save
+    // does not upload the same pictures again
+    window._clEditImages = [...imgs];
+    $(document).trigger('cl-render-slots');
 
     const subCategory = $('#cl-subcategory-edit').val();
 
@@ -1385,14 +1676,18 @@ function saveCurrentEdit() {
         }
     }
     
+    // Now that the item points at the new files, drop the ones it no longer uses
+    droppedImages.forEach(src => { clDeleteImageFile(src); });
+
     saveState();
     updateSTScriptVariables();
     updateContext();
+    updateStorageStatus();
 }
 
 async function describeImageEdit() {
-    const allImages = (window._clEditImages || []).filter(Boolean);
-    if (allImages.length === 0) {
+    const storedImages = (window._clEditImages || []).filter(Boolean);
+    if (storedImages.length === 0) {
         toastr.warning("Please attach at least one image first.");
         return;
     }
@@ -1402,6 +1697,10 @@ async function describeImageEdit() {
     $btn.html('<i class="fa-solid fa-spinner fa-spin"></i> Describing...').prop('disabled', true);
 
     try {
+        // Images already moved to disk are paths, so read them back for the vision API
+        const allImages = await clImagesToDataUrls(storedImages);
+        if (allImages.length === 0) throw new Error("Could not read the attached image(s).");
+
         const promptType = localStorage.getItem(currentMode === 'location' ? 'location_prompt' : 'clothes_prompt') || 'brief';
         const subCat = $('#cl-subcategory-edit').val() || 'outfit';
         let prompt = "";
@@ -1517,7 +1816,7 @@ async function describeImageEdit() {
         }
 
         $('#cl-desc-edit').val(resultText.trim());
-        saveCurrentEdit();
+        await saveCurrentEdit();
         toastr.success("Outfit described successfully!");
 
     } catch (e) {
@@ -1694,9 +1993,9 @@ function loadState() {
                 item.images = item.imageBase64 ? [item.imageBase64] : [];
                 changed = true;
             }
-            // Compress any large images in the array
+            // Compress any large images still held inline (disk paths are left alone)
             for (let idx = 0; idx < item.images.length; idx++) {
-                if (item.images[idx] && item.images[idx].length > 300000) {
+                if (isDataUrl(item.images[idx]) && item.images[idx].length > 300000) {
                     try {
                         item.images[idx] = await compressImage(item.images[idx], 800, 800, 0.7);
                         changed = true;
@@ -1710,6 +2009,12 @@ function loadState() {
             saveState();
             console.log("Clothes extension migrated/compressed images.");
         }
+
+        const inline = getInlineImageStats();
+        if (inline.count > 0) {
+            console.warn(`${LOG_PREFIX} ${inline.count} image(s) (~${formatBytes(inline.bytes)}) are still embedded in settings. Settings -> Image Storage -> "Move images to disk" will offload them.`);
+        }
+        updateStorageStatus();
     }, 2000);
 }
 
@@ -1937,25 +2242,26 @@ function updateContext() {
 }
 
 // --- IMAGE INJECTION FOR MULTIMODAL ---
-function onChatCompletionPromptReady(eventData) {
+async function onChatCompletionPromptReady(eventData) {
     const injectMode = localStorage.getItem('location_inject_mode') || 'text';
     if (injectMode !== 'image') return;
-    
+
     const { chat, dryRun } = eventData;
     if (dryRun || !chat || !Array.isArray(chat)) return;
-    
+
     const activeLocations = getActiveItems('location');
     const imagesToInject = [];
-    
-    Object.keys(activeLocations).forEach(entityName => {
+
+    for (const entityName of Object.keys(activeLocations)) {
         const itemId = activeLocations[entityName];
         const item = clothesState.items.find(i => i.id === itemId);
-        const itemImages = item ? (item.images && item.images.length > 0 ? item.images : (item.imageBase64 ? [item.imageBase64] : [])) : [];
+        // Stored images may be disk paths; the API needs the actual bytes
+        const itemImages = await clImagesToDataUrls(getItemImages(item));
         if (itemImages.length > 0) {
             imagesToInject.push({ entityName, item, itemImages });
         }
-    });
-    
+    }
+
     if (imagesToInject.length === 0) return;
     
     // Find the last system message or first user message to attach images to
@@ -2019,8 +2325,8 @@ function initializeExtension() {
         });
         
         // Hook into prompt assembly to inject location images for multimodal
-        eventSource.on(event_types.CHAT_COMPLETION_PROMPT_READY, (eventData) => {
-            onChatCompletionPromptReady(eventData);
+        eventSource.on(event_types.CHAT_COMPLETION_PROMPT_READY, async (eventData) => {
+            await onChatCompletionPromptReady(eventData);
         });
     }
 
@@ -2035,7 +2341,7 @@ function initializeExtension() {
                 if (injectMode === 'image') {
                     const bodyObj = JSON.parse(options.body);
                     if (bodyObj.messages && Array.isArray(bodyObj.messages)) {
-                        const injected = injectLocationImagesIntoMessages(bodyObj.messages);
+                        const injected = await injectLocationImagesIntoMessages(bodyObj.messages);
                         if (injected) {
                             options = { ...options, body: JSON.stringify(bodyObj) };
                             console.log(`${LOG_PREFIX} [fetch interceptor] Injected location images into external request`);
@@ -2054,19 +2360,20 @@ function initializeExtension() {
  * Injects location images into a messages array (used by fetch interceptor).
  * Returns true if images were injected.
  */
-function injectLocationImagesIntoMessages(messages) {
+async function injectLocationImagesIntoMessages(messages) {
     const activeLocations = getActiveItems('location');
     const imagesToInject = [];
-    
-    Object.keys(activeLocations).forEach(entityName => {
+
+    for (const entityName of Object.keys(activeLocations)) {
         const itemId = activeLocations[entityName];
         const item = clothesState.items.find(i => i.id === itemId);
-        const itemImages = item ? (item.images && item.images.length > 0 ? item.images : (item.imageBase64 ? [item.imageBase64] : [])) : [];
+        // Stored images may be disk paths; the API needs the actual bytes
+        const itemImages = await clImagesToDataUrls(getItemImages(item));
         if (itemImages.length > 0) {
             imagesToInject.push({ entityName, item, itemImages });
         }
-    });
-    
+    }
+
     if (imagesToInject.length === 0) return false;
     
     // Find the best target: last system message, or first user message

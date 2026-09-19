@@ -258,7 +258,19 @@
 
 /* Custom Checkbox */
 .cl-checkbox-wrapper { display: flex; align-items: center; gap: 10px; cursor: pointer; user-select: none; margin-bottom: 15px; position: relative; }
-.cl-checkbox { position: absolute !important; opacity: 0 !important; width: 0 !important; height: 0 !important; margin: 0 !important; padding: 0 !important; pointer-events: none !important; appearance: none !important; }
+/* The native box is hidden and .cl-checkbox-custom is drawn in its place. Themes that
+   restyle checkboxes as switches (SillyTelegram) pin them with min-width/flex-basis,
+   which width:0 alone cannot beat inside a flex row — so those are zeroed too. */
+#cl-modal .cl-checkbox-wrapper input.cl-checkbox,
+.cl-checkbox {
+    position: absolute !important; opacity: 0 !important;
+    width: 0 !important; height: 0 !important;
+    min-width: 0 !important; min-height: 0 !important;
+    flex: 0 0 0 !important;
+    margin: 0 !important; padding: 0 !important; border: 0 !important;
+    background: none !important; box-shadow: none !important; outline: none !important;
+    pointer-events: none !important; appearance: none !important;
+}
 .cl-checkbox-custom { width: 20px; height: 20px; border: 2px solid var(--cl-border); border-radius: 6px; background: var(--cl-bg-input); transition: 0.2s; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
 .cl-checkbox:checked + .cl-checkbox-custom { background: var(--cl-accent); border-color: var(--cl-accent); }
 .cl-checkbox:checked + .cl-checkbox-custom::after { content: '\f00c'; font-family: 'Font Awesome 6 Free'; font-weight: 900; color: #000; font-size: 12px; }
