@@ -1569,7 +1569,7 @@ function renderEditTags() {
     const $list = $('#cl-tags-list-edit');
     $list.empty();
     editingItemTags.forEach((tag, idx) => {
-        const $chip = $(`<div class="cl-tag-chip">${tag} <i class="fa-solid fa-xmark cl-tag-remove"></i></div>`);
+        const $chip = $(`<div class="cl-tag-chip">${escapeHtml(tag)} <i class="fa-solid fa-xmark cl-tag-remove"></i></div>`);
         $chip.find('.cl-tag-remove').on('click', () => {
             editingItemTags.splice(idx, 1);
             renderEditTags();
@@ -1585,8 +1585,9 @@ function renderEditTags() {
 
     const $suggList = $('#cl-tags-suggested-edit');
     $suggList.empty();
-    Array.from(suggested).sort().slice(0, 15).forEach(tag => {
-        const $chip = $(`<div class="cl-suggested-tag">+ ${tag}</div>`);
+    // Show every known tag; the container scrolls when there are many
+    Array.from(suggested).sort().forEach(tag => {
+        const $chip = $(`<div class="cl-suggested-tag">+ ${escapeHtml(tag)}</div>`);
         $chip.on('click', () => {
             if (!editingItemTags.includes(tag)) {
                 editingItemTags.push(tag);
@@ -2026,8 +2027,42 @@ function saveState() {
             stContext.saveSettingsDebounced();
         }
     }
-    // Also save to localStorage as a fast local fallback
-    localStorage.setItem('clothes_state_v2', JSON.stringify(clothesState));
+    saveLocalMirror();
+}
+
+// localStorage is only a convenience copy (loadState reads it when the server has
+// nothing), and the browser caps it at ~5 MB for the whole origin. Running out of
+// room there must never fail a save, so it degrades step by step:
+// full copy -> copy without inline images -> no copy at all.
+function saveLocalMirror() {
+    const KEY = 'clothes_state_v2';
+    const trySet = (value) => {
+        try {
+            localStorage.setItem(KEY, value);
+            return true;
+        } catch (e) {
+            return false;
+        }
+    };
+
+    if (trySet(JSON.stringify(clothesState))) return;
+
+    // Embedded base64 is what blows the quota; paths to files on disk are tiny.
+    const slim = {
+        ...clothesState,
+        items: (clothesState.items || []).map(item => {
+            const kept = getItemImages(item).filter(src => !isDataUrl(src));
+            return { ...item, images: kept, imageBase64: kept[0] || '' };
+        }),
+    };
+    if (trySet(JSON.stringify(slim))) {
+        console.warn(`${LOG_PREFIX} localStorage is full; saved a copy without embedded images. Use Settings -> Image Storage -> "Move images to disk".`);
+        return;
+    }
+
+    // Drop the stale copy rather than leave an outdated one that loadState could prefer later
+    try { localStorage.removeItem(KEY); } catch (e) {}
+    console.warn(`${LOG_PREFIX} localStorage is full; skipped the local backup copy (settings.json is unaffected).`);
 }
 
 function getQuickAccessMode() {
