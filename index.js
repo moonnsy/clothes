@@ -1,16 +1,37 @@
 import { getContext } from '../../../extensions.js';
 import { eventSource, event_types, generateRaw } from '../../../../script.js';
+import {
+    IIG_MODULE_NAME,
+    PREVIEW_CATEGORIES,
+    DEFAULT_PREVIEW_TEMPLATES,
+    buildPreviewPrompt,
+    resolveStyle,
+    getImageGenConfig,
+    generatePreviewImage,
+    resolveToDataUrl,
+    splitDataUrl,
+    collectPreviewReferences,
+    collectKnownReferenceNames,
+} from './preview-gen.js';
 
 const extensionName = "Clothes";
 const LOG_PREFIX = "[Clothes]";
 
 let clothesState = {
-    items: [], // { id, type, folder, name, description, imageBase64 }
+    // { id, type: 'char'|'user'|'npc', npc (npc items only), folder, name, description, images[], preview }
+    items: [],
+    npcs: [], // NPC names added by hand; names that only appear on items are picked up too
+    previewTemplates: {}, // per-category prompt overrides for preview generation
     activeCharItemId: null, // Legacy global fallback
     activeUserItemId: null // Legacy global fallback
 };
 
 let currentMode = 'clothes'; // 'clothes' | 'location'
+// The NPC section is the clothes data scoped to one NPC: currentMode stays 'clothes'
+// and currentType becomes 'npc', so equipping, tags and AI descriptions all work as is.
+let npcSection = false;
+let savedChatEntity = null; // the character tab to return to when leaving the NPC section
+let previewBusy = false;
 let activeProfileName = '';
 let currentView = 'gallery'; // 'gallery' | 'edit'
 let editingItemId = null;
@@ -258,7 +279,7 @@ function generateId() {
 }
 
 function compressImage(dataUrl, maxWidth, maxHeight, quality = 0.8) {
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
         const img = new Image();
         img.onload = () => {
             let width = img.width;
@@ -278,6 +299,8 @@ function compressImage(dataUrl, maxWidth, maxHeight, quality = 0.8) {
             
             resolve(canvas.toDataURL('image/webp', quality));
         };
+        // Without this a picture that fails to decode left the promise pending forever
+        img.onerror = () => reject(new Error('Could not decode the image'));
         img.src = dataUrl;
     });
 }
@@ -378,10 +401,10 @@ async function clImagesToDataUrls(sources) {
     return resolved.filter(Boolean);
 }
 
-/** True if any item still points at this image. */
+/** True if any item still points at this image, as a photo or as its preview. */
 function isImageReferenced(src) {
     if (!src) return false;
-    return (clothesState.items || []).some(item => getItemImages(item).includes(src));
+    return (clothesState.items || []).some(item => item.preview === src || getItemImages(item).includes(src));
 }
 
 /**
@@ -533,9 +556,10 @@ function buildModal() {
         <div class="cl-flex-center">
             <div class="cl-flex-container">
                 <div class="cl-header">
-                    <div style="display:flex; gap:10px; align-items:center;">
-                        <button class="cl-mode-btn active" data-mode="clothes"><i class="fa-solid fa-shirt"></i> Clothes</button>
-                        <button class="cl-mode-btn" data-mode="location"><i class="fa-solid fa-map-location-dot"></i> Locations</button>
+                    <div style="display:flex; gap:6px; align-items:center;">
+                        <button class="cl-mode-btn active" data-mode="clothes" title="Clothes" aria-label="Clothes"><i class="fa-solid fa-shirt"></i></button>
+                        <button class="cl-mode-btn" data-mode="location" title="Locations" aria-label="Locations"><i class="fa-solid fa-map-location-dot"></i></button>
+                        <button class="cl-mode-btn" data-mode="npc" title="NPC wardrobe" aria-label="NPC wardrobe"><i class="fa-solid fa-user-group"></i></button>
                     </div>
                     <div style="display:flex; align-items:center;">
                         <i class="fa-solid fa-eye-slash cl-settings-icon interactable" id="cl-btn-filter-active" title="Toggle Equipped Items Only" style="margin-right:15px; font-size:1.1em;"></i>
@@ -549,10 +573,20 @@ function buildModal() {
                     <!-- Tabs are dynamically rendered here -->
                 </div>
 
+                <!-- NPC picker: only shown in the NPC section -->
+                <div id="cl-npc-bar" style="display:none;">
+                    <div class="cl-npc-add">
+                        <input type="text" id="cl-npc-name-input" class="cl-input-field" maxlength="60" placeholder="Add an NPC by name..." autocomplete="off">
+                        <button class="cl-btn cl-btn-secondary cl-npc-btn" id="cl-btn-npc-add" title="Add NPC"><i class="fa-solid fa-plus"></i></button>
+                        <button class="cl-btn cl-btn-secondary cl-npc-btn" id="cl-btn-npc-remove" title="Remove the selected NPC"><i class="fa-solid fa-user-minus"></i></button>
+                    </div>
+                    <div class="cl-suggested-tags" id="cl-npc-suggest"></div>
+                </div>
+
                 <!-- GALLERY VIEW -->
                 <div class="cl-content cl-view active" id="cl-view-gallery">
                     <div class="cl-gallery-header" style="display:flex; gap:10px;">
-                        <div style="flex:1; min-width:0;">
+                        <div id="cl-folder-wrapper" style="flex:1; min-width:0;">
                             <select id="cl-folder-select" class="cl-select-field">
                                 <option value="All">All Outfits</option>
                             </select>
@@ -609,6 +643,19 @@ function buildModal() {
                     <textarea id="cl-desc-edit" class="cl-input-field" style="resize:vertical; min-height:80px;" placeholder="AI will describe the outfit here, or write manually..."></textarea>
 
                     <button class="cl-btn" id="cl-btn-describe-edit" title="Hold or Right-Click to add an OOC note"><i class="fa-solid fa-wand-magic-sparkles"></i> Describe with AI</button>
+
+                    <div id="cl-preview-block">
+                        <span class="cl-label">Card preview</span>
+                        <div class="cl-preview-row">
+                            <div class="cl-preview-box" id="cl-preview-box"></div>
+                            <div class="cl-preview-side">
+                                <button class="cl-btn" id="cl-btn-gen-preview" style="margin-top:0;"><i class="fa-solid fa-image"></i> Generate preview</button>
+                                <button class="cl-btn cl-btn-secondary" id="cl-btn-remove-preview" style="margin-top:8px;"><i class="fa-solid fa-trash"></i> Remove preview</button>
+                                <div class="cl-preview-hint">Drawn from the description above, square. The photos you attached stay untouched.</div>
+                            </div>
+                        </div>
+                    </div>
+
                     <button class="cl-btn cl-btn-secondary" id="cl-btn-save-edit" style="margin-top: 10px;"><i class="fa-solid fa-floppy-disk"></i> Save Changes</button>
                 </div>
 
@@ -687,6 +734,12 @@ function buildModal() {
                         <span style="color:#E5E7EB; font-size:0.9em;">Select multiple tags at once when filtering</span>
                     </label>
 
+                    <label class="cl-checkbox-wrapper">
+                        <input type="checkbox" id="cl-setting-fullscreen" class="cl-checkbox">
+                        <div class="cl-checkbox-custom"></div>
+                        <span style="color:#E5E7EB; font-size:0.9em;">Fullscreen (opens edge to edge, handy on a phone)</span>
+                    </label>
+
                     <div style="margin-bottom: 15px;">
                         <span class="cl-label">Quick Access Button</span>
                         <select id="cl-setting-quick-icon" class="cl-select-field">
@@ -705,6 +758,28 @@ function buildModal() {
                     </div>
                     <button id="cl-btn-test-profile" class="cl-btn cl-btn-secondary" style="margin-top: 10px;">Test Connection</button>
                     <div id="cl-api-status" class="cl-status-text"></div>
+
+                    <hr style="border:0; border-top:1px solid rgba(255,255,255,0.05); margin:20px 0 15px 0;">
+
+                    <span class="cl-label">Preview Generation</span>
+                    <p style="font-size:0.8em; color:#9CA3AF; margin:4px 0 10px 0; line-height:1.4;">
+                        Uses the connection from SillyImages (provider, key, model) and, when its "force style" is on, its active style. Nothing is changed in SillyImages.
+                    </p>
+                    <div id="cl-preview-conn-status" class="cl-status-text" style="margin-top:0; text-align:left;"></div>
+                    <div id="cl-preview-style-status" class="cl-status-text" style="text-align:left;"></div>
+
+                    <span class="cl-label">Prompt for</span>
+                    <select id="cl-setting-preview-cat" class="cl-select-field">
+                        <option value="outfit">Outfit</option>
+                        <option value="hairstyle">Hairstyle</option>
+                        <option value="accessory">Accessories</option>
+                        <option value="makeup">Makeup</option>
+                    </select>
+                    <textarea id="cl-setting-preview-template" class="cl-input-field" spellcheck="false" style="resize:vertical; min-height:200px; margin-top:8px; font-family:monospace; font-size:0.8em; line-height:1.4;"></textarea>
+                    <p style="font-size:0.78em; color:#9CA3AF; margin:6px 0 0 0; line-height:1.4;">
+                        <code>{{style}}</code> the style, <code>{{description}}</code> the item description, <code>{{reference_note}}</code> the "exact appearance" line, added only when a reference is picked.
+                    </p>
+                    <button id="cl-btn-preview-reset" class="cl-btn cl-btn-secondary" style="margin-top: 10px;"><i class="fa-solid fa-rotate-left"></i> Reset this prompt to default</button>
 
                     <hr style="border:0; border-top:1px solid rgba(255,255,255,0.05); margin:20px 0 15px 0;">
 
@@ -744,6 +819,20 @@ function buildModal() {
                 <div style="display:flex; justify-content:center; gap:10px;">
                     <button class="cl-btn cl-btn-secondary" id="cl-btn-cancel-delete" style="flex:1; margin:0; padding:10px;">Cancel</button>
                     <button class="cl-btn cl-card-btn-del" id="cl-btn-confirm-delete" style="flex:1; margin:0; padding:10px; color:#fff;"><i class="fa-solid fa-trash"></i> Delete</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Who will be in the preview -->
+        <div id="cl-ref-picker-modal" class="cl-modal-overlay" style="display:none;">
+            <div class="cl-modal-box cl-ref-box">
+                <h3 style="margin:0 0 4px 0; color:#E5E7EB; font-size:1.1em;">Who will be in the preview?</h3>
+                <div id="cl-ref-style-line" class="cl-ref-style-line"></div>
+                <input type="text" id="cl-ref-search" class="cl-input-field" placeholder="Search by name or chat" autocomplete="off" style="margin-top:10px;">
+                <div class="cl-ref-list" id="cl-ref-list"></div>
+                <div style="display:flex; justify-content:center; gap:10px; margin-top:12px;">
+                    <button class="cl-btn cl-btn-secondary" id="cl-btn-ref-cancel" style="flex:1; margin:0; padding:10px;">Cancel</button>
+                    <button class="cl-btn" id="cl-btn-ref-none" style="flex:1; margin:0; padding:10px;"><i class="fa-solid fa-user-slash"></i> No reference</button>
                 </div>
             </div>
         </div>
@@ -827,10 +916,11 @@ function escapeHtml(unsafe) {
          .replace(/'/g, "&#039;");
 }
 
-function renderTabs() {
+/** The user and the characters of the open chat, as the Clothes section's tabs. */
+function getChatMembers() {
     const stContext = getContext();
     const userName = stContext.name1 || 'User';
-    
+
     let members = [];
     if (stContext.groupId) {
         const group = stContext.groups.find(g => g.id === stContext.groupId);
@@ -843,13 +933,28 @@ function renderTabs() {
     } else {
         members = [stContext.name2 || 'Character'];
     }
+    return { userName, members };
+}
+
+/** Does this tab belong to the entity? (attr, not .data(): jQuery turns "123" into a number) */
+function tabIsEntity(el, entity) {
+    return $(el).attr('data-entity') === String(entity);
+}
+
+function renderTabs() {
+    if (npcSection) {
+        renderNpcTabs();
+        return;
+    }
+
+    const { userName, members } = getChatMembers();
 
     const $tabs = $('.cl-tabs');
     $tabs.empty();
-    
+
     // User tab always first
     $tabs.append(`<div class="cl-tab-btn" data-entity="${escapeHtml(userName)}" data-type="user">${escapeHtml(userName)}</div>`);
-    
+
     // Character tabs
     members.forEach(m => {
         $tabs.append(`<div class="cl-tab-btn" data-entity="${escapeHtml(m)}" data-type="char">${escapeHtml(m)}</div>`);
@@ -858,7 +963,7 @@ function renderTabs() {
     // Make sure we have a valid selection
     let found = false;
     $('.cl-tab-btn').each(function() {
-        if ($(this).data('entity') === currentEntity) found = true;
+        if (tabIsEntity(this, currentEntity)) found = true;
     });
 
     if (!found) {
@@ -867,7 +972,7 @@ function renderTabs() {
         currentType = fallback === userName ? 'user' : 'char';
     }
 
-    $('.cl-tab-btn').filter(function() { return $(this).data('entity') === currentEntity; }).addClass('active');
+    $('.cl-tab-btn').filter(function() { return tabIsEntity(this, currentEntity); }).addClass('active');
 
     $('.cl-tab-btn').off('click').on('click', function() {
         switchTab($(this).attr('data-entity'), $(this).attr('data-type'));
@@ -875,16 +980,20 @@ function renderTabs() {
 }
 
 function switchTab(entity, type) {
-    if (entity && type) {
+    if (entity !== undefined && entity !== null && type) {
         currentEntity = entity;
         currentType = type;
     }
-    
+
     $('.cl-tab-btn').removeClass('active');
-    $('.cl-tab-btn').filter(function() { return $(this).data('entity') === currentEntity; }).addClass('active');
-    
-    currentFolder = currentEntity || 'Default';
-    
+    $('.cl-tab-btn').filter(function() { return tabIsEntity(this, currentEntity); }).addClass('active');
+
+    // An NPC's wardrobe is the NPC itself, so it has no folders to pick between
+    currentFolder = npcSection ? 'All' : (currentEntity || 'Default');
+    if (npcSection && currentEntity) {
+        localStorage.setItem('clothes_npc_current', currentEntity);
+    }
+
     if (currentView === 'settings') {
         currentView = 'gallery';
     }
@@ -896,6 +1005,166 @@ function showView(viewName) {
     currentView = viewName;
     $('.cl-view').removeClass('active');
     $(`#cl-view-${viewName}`).addClass('active');
+    updateNpcBarVisibility();
+}
+
+// --- NPC SECTION ---
+/** NPCs added by hand plus any name that only exists on an item, de-duplicated ignoring case. */
+function getNpcNames() {
+    const seen = new Set();
+    const out = [];
+    const add = (raw) => {
+        const name = String(raw || '').trim();
+        const key = name.toLowerCase();
+        if (!name || seen.has(key)) return;
+        seen.add(key);
+        out.push(name);
+    };
+    (clothesState.npcs || []).forEach(add);
+    clothesState.items.forEach(item => { if (item.type === 'npc') add(item.npc); });
+    return out.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+}
+
+function npcItemCount(name) {
+    return clothesState.items.filter(item => item.type === 'npc' && item.npc === name).length;
+}
+
+function updateNpcBarVisibility() {
+    $('#cl-npc-bar').toggle(npcSection && currentView === 'gallery');
+}
+
+function renderNpcTabs() {
+    const names = getNpcNames();
+    const $tabs = $('.cl-tabs');
+    $tabs.empty();
+
+    if (names.length === 0) {
+        $tabs.append('<div class="cl-tab-empty">No NPCs yet. Add one below.</div>');
+    }
+    names.forEach(n => {
+        $tabs.append(`<div class="cl-tab-btn" data-entity="${escapeHtml(n)}" data-type="npc">${escapeHtml(n)}</div>`);
+    });
+
+    currentType = 'npc';
+    if (!names.includes(currentEntity)) currentEntity = names[0] || '';
+
+    $('.cl-tab-btn').filter(function() { return tabIsEntity(this, currentEntity); }).addClass('active');
+    $('.cl-tab-btn').off('click').on('click', function() {
+        switchTab($(this).attr('data-entity'), 'npc');
+    });
+
+    renderNpcSuggestions();
+}
+
+/** Names SillyImages already has references for, offered as one-tap NPCs. */
+function renderNpcSuggestions() {
+    const $box = $('#cl-npc-suggest');
+    $box.empty();
+
+    const stContext = getContext();
+    const iig = stContext.extensionSettings?.[IIG_MODULE_NAME];
+    if (!iig) return;
+
+    const { userName, members } = getChatMembers();
+    const taken = new Set([...getNpcNames(), userName, ...members].map(n => n.toLowerCase()));
+    const needle = String($('#cl-npc-name-input').val() || '').trim().toLowerCase();
+
+    collectKnownReferenceNames(iig, stContext)
+        .filter(name => !taken.has(name.toLowerCase()) && (!needle || name.toLowerCase().includes(needle)))
+        .forEach(name => {
+            const $chip = $(`<div class="cl-suggested-tag" title="From SillyImages references">+ ${escapeHtml(name)}</div>`);
+            $chip.on('click', () => addNpc(name));
+            $box.append($chip);
+        });
+}
+
+function addNpc(rawName) {
+    const name = String(rawName || '').replace(/\s+/g, ' ').trim();
+    if (!name) {
+        toastr.warning('Type a name for the NPC first.');
+        return;
+    }
+
+    const { userName, members } = getChatMembers();
+    if ([userName, ...members].some(n => n.toLowerCase() === name.toLowerCase())) {
+        toastr.warning(`"${name}" is in this chat. Use the Clothes section for them.`);
+        return;
+    }
+
+    const existing = getNpcNames().find(n => n.toLowerCase() === name.toLowerCase());
+    const finalName = existing || name;
+    if (!existing) {
+        clothesState.npcs.push(finalName);
+        saveState();
+    }
+
+    $('#cl-npc-name-input').val('');
+    currentEntity = finalName;
+    renderTabs();
+    switchTab(finalName, 'npc');
+}
+
+function removeCurrentNpc() {
+    if (!currentEntity) {
+        toastr.info('Pick an NPC first.');
+        return;
+    }
+    const count = npcItemCount(currentEntity);
+    if (count > 0) {
+        toastr.warning(`${currentEntity} still has ${count} item${count === 1 ? '' : 's'}. Delete ${count === 1 ? 'it' : 'them'} first.`);
+        return;
+    }
+
+    clothesState.npcs = clothesState.npcs.filter(n => n.toLowerCase() !== currentEntity.toLowerCase());
+    saveState();
+    localStorage.removeItem('clothes_npc_current');
+    currentEntity = '';
+    renderTabs();
+    switchTab(currentEntity, 'npc');
+}
+
+/**
+ * Switches between the Clothes, Locations and NPC sections. Clothes and NPC share
+ * the same data and screens; NPC just scopes it to one NPC instead of the chat's
+ * user and characters.
+ */
+function applySection(section) {
+    const wasNpc = npcSection;
+    npcSection = section === 'npc';
+    currentMode = npcSection ? 'clothes' : section;
+
+    if (npcSection && !wasNpc) {
+        savedChatEntity = { entity: currentEntity, type: currentType };
+    }
+
+    if (npcSection) {
+        const names = getNpcNames();
+        const remembered = localStorage.getItem('clothes_npc_current');
+        currentEntity = names.includes(remembered) ? remembered : (names[0] || '');
+        currentType = 'npc';
+    } else if (wasNpc) {
+        // Back to a chat character; renderTabs corrects it if they are gone
+        currentEntity = savedChatEntity ? savedChatEntity.entity : '';
+        currentType = savedChatEntity ? savedChatEntity.type : 'char';
+        savedChatEntity = null;
+    }
+
+    if (currentMode === 'location') {
+        $('#cl-edit-label-name').text('Name');
+        $('#cl-edit-label-desc').text('Location Description (Context)');
+        $('#cl-folder-select option[value="All"]').text('All Locations');
+        $('#cl-subcategory-wrapper').hide();
+        $('#cl-edit-subcategory-wrapper').hide();
+    } else {
+        $('#cl-edit-label-name').text('Name');
+        $('#cl-edit-label-desc').text('Outfit Description (Context)');
+        $('#cl-folder-select option[value="All"]').text('All Outfits');
+        $('#cl-subcategory-wrapper').show();
+        $('#cl-edit-subcategory-wrapper').show();
+    }
+
+    renderTabs();
+    switchTab(currentEntity, currentType); // Re-renders the gallery for the current tab and section
 }
 
 function bindEvents() {
@@ -903,25 +1172,19 @@ function bindEvents() {
     $(document).on('click', '.cl-mode-btn', function() {
         $('.cl-mode-btn').removeClass('active');
         $(this).addClass('active');
-        currentMode = $(this).data('mode');
-        
-        // Update labels based on mode
-        if (currentMode === 'location') {
-            $('#cl-edit-label-name').text('Name');
-            $('#cl-edit-label-desc').text('Location Description (Context)');
-            $('#cl-folder-select option[value="All"]').text('All Locations');
-            $('#cl-subcategory-wrapper').hide();
-            $('#cl-edit-subcategory-wrapper').hide();
-        } else {
-            $('#cl-edit-label-name').text('Name');
-            $('#cl-edit-label-desc').text('Outfit Description (Context)');
-            $('#cl-folder-select option[value="All"]').text('All Outfits');
-            $('#cl-subcategory-wrapper').show();
-            $('#cl-edit-subcategory-wrapper').show();
-        }
-        
-        switchTab(currentEntity, currentType); // Re-renders gallery for current tab but new mode
+        applySection($(this).data('mode'));
     });
+
+    // NPC picker
+    $('#cl-btn-npc-add').on('click', () => addNpc($('#cl-npc-name-input').val()));
+    $('#cl-btn-npc-remove').on('click', removeCurrentNpc);
+    $('#cl-npc-name-input').on('keypress', function(e) {
+        if (e.which === 13) {
+            e.preventDefault();
+            addNpc($(this).val());
+        }
+    });
+    $('#cl-npc-name-input').on('input', renderNpcSuggestions);
 
     $('#cl-btn-filter-active').on('click', function() {
         filterActiveOnly = !filterActiveOnly;
@@ -958,6 +1221,27 @@ function bindEvents() {
         showView('settings');
         loadProfiles();
         updateStorageStatus();
+        updatePreviewStatus();
+    });
+
+    // Preview generation
+    $('#cl-btn-gen-preview').on('click', generatePreviewForCurrentEdit);
+    $('#cl-btn-remove-preview').on('click', removeItemPreview);
+
+    $('#cl-setting-preview-cat').on('change', loadPreviewTemplateEditor);
+    let previewTemplateTimer = null;
+    $('#cl-setting-preview-template').on('input', function() {
+        // Category and text are read now: the picker may change before the save fires
+        const category = getPreviewCategory();
+        const text = $(this).val();
+        clearTimeout(previewTemplateTimer);
+        previewTemplateTimer = setTimeout(() => setPreviewTemplate(category, text), 400);
+    });
+    $('#cl-btn-preview-reset').on('click', function() {
+        clearTimeout(previewTemplateTimer); // a pending edit must not undo the reset
+        setPreviewTemplate(getPreviewCategory(), '');
+        loadPreviewTemplateEditor();
+        toastr.success('Prompt reset to default.');
     });
 
     $('#cl-btn-migrate-images').on('click', async function() {
@@ -1098,6 +1382,13 @@ function bindEvents() {
     }
 
     // Settings
+    // Per device on purpose: a phone wants this on, a desktop usually does not
+    $('#cl-setting-fullscreen').on('change', function() {
+        const on = $(this).is(':checked');
+        localStorage.setItem('clothes_fullscreen', on ? 'true' : 'false');
+        applyFullscreen(on);
+    });
+
     $('#cl-setting-multi-tag').on('change', function() {
         const isChecked = $(this).is(':checked');
         localStorage.setItem('clothes_multi_tag', isChecked ? 'true' : 'false');
@@ -1248,7 +1539,7 @@ function bindEvents() {
             }
         });
         
-        const orphanedImages = getItemImages(item);
+        const orphanedImages = [...getItemImages(item), ...(item.preview ? [item.preview] : [])];
 
         clothesState.items = clothesState.items.filter(i => i.id !== item.id);
         orphanedImages.forEach(src => { clDeleteImageFile(src); });
@@ -1319,22 +1610,34 @@ function renderGallery() {
     const $grid = $('#cl-gallery-grid');
     $grid.empty();
 
-    const tabItems = clothesState.items.filter(item => item.type === currentType && (item.category || 'clothes') === currentMode);
-    
+    // NPC section with nobody selected yet: nothing to show or add to
+    if (npcSection && !currentEntity) {
+        $('#cl-gallery-tags-filter').hide();
+        $('#cl-folder-wrapper').hide();
+        $('#cl-subcategory-wrapper').hide();
+        $grid.append('<div class="cl-npc-empty">Add an NPC above, or tap one of the names from your image references, to start building their wardrobe.</div>');
+        return;
+    }
+
+    const tabItems = clothesState.items.filter(item =>
+        item.type === currentType
+        && (item.category || 'clothes') === currentMode
+        && (!npcSection || item.npc === currentEntity));
+
     // Manage Folders
     const folders = new Set();
     tabItems.forEach(item => { if (item.folder) folders.add(item.folder); });
     folders.add(currentEntity || 'Default');
-    
+
     const $folderSelect = $('#cl-folder-select');
     $folderSelect.empty();
     $folderSelect.append(`<option value="All">All ${currentMode === 'location' ? 'Locations' : 'Outfits'}</option>`);
     Array.from(folders).sort().forEach(f => {
-        $folderSelect.append(`<option value="${f}">${f}</option>`);
+        $folderSelect.append(`<option value="${escapeHtml(f)}">${escapeHtml(f)}</option>`);
     });
-    
+
     if (currentFolder !== 'All' && !folders.has(currentFolder)) {
-        $folderSelect.append(`<option value="${currentFolder}">${currentFolder}</option>`);
+        $folderSelect.append(`<option value="${escapeHtml(currentFolder)}">${escapeHtml(currentFolder)}</option>`);
     }
     $folderSelect.val(currentFolder);
 
@@ -1437,10 +1740,11 @@ function renderGallery() {
         });
         
         $tagsFilterContainer.hide();
-        $('#cl-folder-select').parent().hide();
+        $('#cl-folder-wrapper').hide();
         $('#cl-subcategory-wrapper').hide();
     } else {
-        $('#cl-folder-select').parent().show();
+        // An NPC is already its own folder, so the folder picker is only for chat characters
+        $('#cl-folder-wrapper').toggle(!npcSection);
         if (currentMode === 'clothes') $('#cl-subcategory-wrapper').show();
     }
 
@@ -1454,7 +1758,8 @@ function renderGallery() {
             isActive = activeItems[currentEntity] === item.id;
         }
         
-        const images = getItemImages(item);
+        // A generated preview is the card's cover; without one, the attached photos are
+        const images = item.preview ? [item.preview] : getItemImages(item);
         const imgCount = images.length;
         const placeholder = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
         
@@ -1557,6 +1862,7 @@ function openEditView(itemId) {
     
     $('#cl-tags-input-edit').val('');
     renderEditTags();
+    renderPreviewBlock();
     showView('edit');
     // Render image slots after view is shown
     if (typeof renderImageSlots === 'undefined') {
@@ -1628,7 +1934,7 @@ async function saveCurrentEdit() {
         const count = clothesState.items.filter(i => i.type === currentType && i.category === 'location').length;
         defaultName = `Location ${editingItemId ? Math.max(1, count) : count + 1}`;
     } else {
-        const count = clothesState.items.filter(i => i.type === currentType && i.category === 'clothes' && (i.subCategory || 'outfit') === subCategory).length;
+        const count = clothesState.items.filter(i => i.type === currentType && i.category === 'clothes' && (i.subCategory || 'outfit') === subCategory && (!npcSection || i.npc === currentEntity)).length;
         const subCatNames = { outfit: 'Outfit', hairstyle: 'Hairstyle', accessory: 'Accessory', makeup: 'Makeup' };
         defaultName = `${subCatNames[subCategory] || 'Outfit'} ${editingItemId ? Math.max(1, count) : count + 1}`;
     }
@@ -1662,17 +1968,23 @@ async function saveCurrentEdit() {
             imageBase64: imgs[0] || '',
             tags: [...editingItemTags]
         };
+        // Tie the item to its NPC; everything else about it is an ordinary clothes item
+        if (npcSection) newItem.npc = currentEntity;
         clothesState.items.push(newItem);
         editingItemId = newItem.id;
-        
-        const activeItems = getActiveItems(currentMode);
-        if (currentMode === 'clothes') {
-            if (!activeItems[currentEntity] || !activeItems[currentEntity][subCategory]) {
-                setActiveItem(currentEntity, newItem.id, currentMode, subCategory);
-            }
-        } else {
-            if (!activeItems[currentEntity]) {
-                setActiveItem(currentEntity, newItem.id, currentMode);
+
+        // A new item is worn right away, except for NPCs: building their wardrobe ahead of
+        // time should not put "NPC wears X" into the prompt of a scene they are not in.
+        if (!npcSection) {
+            const activeItems = getActiveItems(currentMode);
+            if (currentMode === 'clothes') {
+                if (!activeItems[currentEntity] || !activeItems[currentEntity][subCategory]) {
+                    setActiveItem(currentEntity, newItem.id, currentMode, subCategory);
+                }
+            } else {
+                if (!activeItems[currentEntity]) {
+                    setActiveItem(currentEntity, newItem.id, currentMode);
+                }
             }
         }
     }
@@ -1684,6 +1996,245 @@ async function saveCurrentEdit() {
     updateSTScriptVariables();
     updateContext();
     updateStorageStatus();
+}
+
+// --- PREVIEW GENERATION ---
+// A square picture for the item's card, drawn from its description through the
+// connection SillyImages already has. The attached photos are never replaced, so
+// "Describe with AI" always sees the real clothes, not the drawing.
+const PREVIEW_LAST_REF_KEY = 'clothes_preview_last_ref';
+
+function getPreviewTemplate(category) {
+    const custom = clothesState.previewTemplates?.[category];
+    if (typeof custom === 'string' && custom.trim()) return custom;
+    return DEFAULT_PREVIEW_TEMPLATES[category] || DEFAULT_PREVIEW_TEMPLATES.outfit;
+}
+
+/** Stores an override, or drops it when the text is empty or just the default again. */
+function setPreviewTemplate(category, text) {
+    if (!clothesState.previewTemplates) clothesState.previewTemplates = {};
+    const fallback = (DEFAULT_PREVIEW_TEMPLATES[category] || '').trim();
+    if (!String(text).trim() || String(text).trim() === fallback) {
+        delete clothesState.previewTemplates[category];
+    } else {
+        clothesState.previewTemplates[category] = String(text);
+    }
+    saveState();
+}
+
+function setPreviewBusy(busy, text) {
+    previewBusy = busy;
+    const item = editingItemId ? clothesState.items.find(i => i.id === editingItemId) : null;
+    const $btn = $('#cl-btn-gen-preview');
+    $btn.prop('disabled', busy);
+    if (busy) {
+        $btn.html(`<i class="fa-solid fa-spinner fa-spin"></i> ${escapeHtml(text || 'Generating...')}`);
+    } else {
+        $btn.html(`<i class="fa-solid fa-image"></i> ${item && item.preview ? 'Regenerate preview' : 'Generate preview'}`);
+    }
+}
+
+/** Shows the item's current preview in the edit view. Locations have none. */
+function renderPreviewBlock() {
+    const isClothes = currentMode === 'clothes';
+    $('#cl-preview-block').toggle(isClothes);
+    if (!isClothes) return;
+
+    const item = editingItemId ? clothesState.items.find(i => i.id === editingItemId) : null;
+    const $box = $('#cl-preview-box').empty();
+    if (item && item.preview) {
+        $box.append($('<img class="cl-preview-img" alt="Preview">').attr('src', item.preview));
+    } else {
+        $box.append('<i class="fa-regular fa-image"></i>');
+    }
+    $('#cl-btn-remove-preview').toggle(!!(item && item.preview));
+    setPreviewBusy(previewBusy);
+}
+
+function removeItemPreview() {
+    const item = editingItemId ? clothesState.items.find(i => i.id === editingItemId) : null;
+    if (!item || !item.preview) return;
+
+    const old = item.preview;
+    delete item.preview;
+    saveState();
+    clDeleteImageFile(old); // after the state no longer points at it
+    renderPreviewBlock();
+}
+
+/**
+ * "Who will be in the preview?" Lists SillyImages' references: the ones named like
+ * the current tab or used last time on top, then this chat, favorites and the archive.
+ * Resolves to { entry } (entry is null for "no reference"), or undefined if cancelled.
+ */
+function pickPreviewReference(entityName, style) {
+    return new Promise(resolve => {
+        const stContext = getContext();
+        const iig = stContext.extensionSettings?.[IIG_MODULE_NAME] || {};
+        const groups = collectPreviewReferences(iig, stContext, entityName, localStorage.getItem(PREVIEW_LAST_REF_KEY) || '');
+        const sections = [['suggested', 'Suggested'], ['current', 'This chat'], ['favorites', 'Favorites'], ['archive', 'Archive']];
+        const flat = [];
+
+        const $modal = $('#cl-ref-picker-modal');
+        const $list = $('#cl-ref-list');
+        const $search = $('#cl-ref-search').val('');
+        $('#cl-ref-style-line').text(style.source === 'sillyimages'
+            ? `Style: ${style.name} (from SillyImages)`
+            : `Style: ${style.name}. SillyImages has no active style.`);
+
+        const render = () => {
+            const needle = String($search.val() || '').trim().toLowerCase();
+            $list.empty();
+            flat.length = 0;
+            let any = false;
+
+            sections.forEach(([group, title]) => {
+                const entries = groups[group].filter(e => !needle || [e.chatLabel, ...e.names].join(' ').toLowerCase().includes(needle));
+                if (entries.length === 0) return;
+                any = true;
+                $list.append($('<div class="cl-ref-section"></div>').text(title));
+                entries.forEach(entry => {
+                    const idx = flat.push(entry) - 1;
+                    const $row = $('<div class="cl-ref-item"><img class="cl-ref-thumb" loading="lazy" alt=""><div class="cl-ref-info"><div class="cl-ref-name"></div><div class="cl-ref-chat"></div></div></div>');
+                    $row.attr('data-idx', idx);
+                    $row.find('img').attr('src', entry.src);
+                    $row.find('.cl-ref-name').text(entry.name || 'Unnamed');
+                    $row.find('.cl-ref-chat').text(entry.chatLabel);
+                    $list.append($row);
+                });
+            });
+
+            if (!any) {
+                $list.append($('<div class="cl-npc-empty"></div>').text(needle
+                    ? 'Nothing found.'
+                    : 'SillyImages has no references with a picture yet. You can still generate without one.'));
+            }
+        };
+
+        const close = (value) => {
+            $modal.hide().off('.clref');
+            $search.off('.clref');
+            $list.off('.clref');
+            $('#cl-btn-ref-cancel, #cl-btn-ref-none').off('.clref');
+            resolve(value);
+        };
+
+        $search.on('input.clref', render);
+        $list.on('click.clref', '.cl-ref-item', function() {
+            const entry = flat[Number($(this).attr('data-idx'))];
+            if (entry) close({ entry });
+        });
+        $('#cl-btn-ref-none').on('click.clref', () => close({ entry: null }));
+        $('#cl-btn-ref-cancel').on('click.clref', () => close(undefined));
+        $modal.on('click.clref', (e) => { if (e.target === $modal[0]) close(undefined); });
+
+        render();
+        $modal.css('display', 'flex');
+    });
+}
+
+async function generatePreviewForCurrentEdit() {
+    if (previewBusy) return;
+
+    const description = String($('#cl-desc-edit').val() || '').trim();
+    if (!description) {
+        toastr.warning('Describe the item first: use "Describe with AI", or write the description yourself.');
+        return;
+    }
+
+    const stContext = getContext();
+    const cfg = getImageGenConfig(stContext.extensionSettings);
+    if (!cfg.ok) {
+        toastr.error(cfg.error);
+        return;
+    }
+
+    const chosenCategory = $('#cl-subcategory-edit').val();
+    const category = PREVIEW_CATEGORIES.includes(chosenCategory) ? chosenCategory : 'outfit';
+    const style = resolveStyle(stContext.extensionSettings[IIG_MODULE_NAME]);
+
+    let reference = null;
+    if (cfg.supportsReferences) {
+        const picked = await pickPreviewReference(currentEntity, style);
+        if (picked === undefined) return; // cancelled
+        reference = picked.entry;
+    } else {
+        toastr.info(`${cfg.label} cannot take a reference picture, so the preview is drawn from the text alone.`);
+    }
+
+    setPreviewBusy(true, 'Saving...');
+    try {
+        // The preview needs an item to live on; Describe with AI saves first for the same reason
+        await saveCurrentEdit();
+        const itemId = editingItemId;
+        if (!itemId) throw new Error('Could not save the item first.');
+
+        const references = [];
+        if (reference) {
+            const refDataUrl = await clImageToDataUrl(reference.src);
+            if (!refDataUrl) throw new Error('Could not read the reference picture.');
+            references.push(splitDataUrl(refDataUrl));
+        }
+
+        const prompt = buildPreviewPrompt({
+            template: getPreviewTemplate(category),
+            style: style.text,
+            description,
+            hasReference: references.length > 0,
+        });
+
+        const generated = await generatePreviewImage(cfg, prompt, references, text => setPreviewBusy(true, text));
+        setPreviewBusy(true, 'Saving...');
+        const generatedDataUrl = await resolveToDataUrl(generated);
+        // A card never needs more than this, and it keeps the gallery light
+        const compact = await compressImage(generatedDataUrl, 1024, 1024, 0.9);
+
+        const item = clothesState.items.find(i => i.id === itemId);
+        if (!item) return; // deleted while it was drawing
+
+        const path = await clUploadImage(compact, `${itemId}_preview`);
+        const previous = item.preview;
+        item.preview = path;
+        if (reference && reference.key) localStorage.setItem(PREVIEW_LAST_REF_KEY, reference.key);
+
+        saveState();
+        if (previous && previous !== path) clDeleteImageFile(previous);
+        toastr.success('Preview ready!');
+    } catch (e) {
+        console.error(LOG_PREFIX, e);
+        toastr.error('Preview failed: ' + e.message);
+    } finally {
+        setPreviewBusy(false);
+        if (currentView === 'edit') renderPreviewBlock();
+        else if (currentView === 'gallery') renderGallery();
+    }
+}
+
+function getPreviewCategory() {
+    return $('#cl-setting-preview-cat').val() || 'outfit';
+}
+
+function loadPreviewTemplateEditor() {
+    $('#cl-setting-preview-template').val(getPreviewTemplate(getPreviewCategory()));
+}
+
+/** Settings: which connection and style the previews will use. */
+function updatePreviewStatus() {
+    const stContext = getContext();
+    const cfg = getImageGenConfig(stContext.extensionSettings);
+    const $conn = $('#cl-preview-conn-status');
+    if (cfg.ok) {
+        $conn.css('color', '').text(`Connected via SillyImages: ${cfg.label}${cfg.supportsReferences ? '' : ' (no reference pictures)'}`);
+    } else {
+        $conn.css('color', '#f59e0b').text(cfg.error);
+    }
+
+    const style = resolveStyle(stContext.extensionSettings?.[IIG_MODULE_NAME]);
+    $('#cl-preview-style-status').text(style.source === 'sillyimages'
+        ? `Style: ${style.name} (from SillyImages)`
+        : 'Style: built-in painterly. SillyImages "force style" is off or has no style.');
+
+    loadPreviewTemplateEditor();
 }
 
 async function describeImageEdit() {
@@ -1906,6 +2457,17 @@ async function testAPIProfile() {
 }
 
 // --- STATE AND CONTEXT ---
+// Fields beyond the item list. loadState has to carry each one over by name, or the
+// next save would write the state back without it.
+function adoptExtraState(source) {
+    if (Array.isArray(source.npcs)) {
+        clothesState.npcs = source.npcs.filter(n => typeof n === 'string' && n.trim());
+    }
+    if (source.previewTemplates && typeof source.previewTemplates === 'object' && !Array.isArray(source.previewTemplates)) {
+        clothesState.previewTemplates = source.previewTemplates;
+    }
+}
+
 function loadState() {
     try {
         const stContext = getContext();
@@ -1915,6 +2477,7 @@ function loadState() {
         if (stContext && stContext.extensionSettings && stContext.extensionSettings.clothes_v2) {
             const parsed = stContext.extensionSettings.clothes_v2;
             if (Array.isArray(parsed.items)) clothesState.items = parsed.items;
+            adoptExtraState(parsed);
             if (parsed.activeCharItemId) clothesState.activeCharItemId = parsed.activeCharItemId;
             if (parsed.activeUserItemId) clothesState.activeUserItemId = parsed.activeUserItemId;
             loaded = true;
@@ -1926,6 +2489,7 @@ function loadState() {
             if (saved) {
                 const lp = JSON.parse(saved);
                 if (Array.isArray(lp.items)) clothesState.items = lp.items;
+                adoptExtraState(lp);
                 if (lp.activeCharItemId) clothesState.activeCharItemId = lp.activeCharItemId;
                 if (lp.activeUserItemId) clothesState.activeUserItemId = lp.activeUserItemId;
                 saveState(); // push to server
@@ -1981,6 +2545,10 @@ function loadState() {
     $('#cl-setting-loc-inject').val(locInject).trigger('change');
     
     $('#cl-setting-multi-tag').prop('checked', isMultiTagEnabled());
+    const fullscreen = localStorage.getItem('clothes_fullscreen') === 'true';
+    $('#cl-setting-fullscreen').prop('checked', fullscreen);
+    applyFullscreen(fullscreen);
+    loadPreviewTemplateEditor();
 
     const quickMode = getQuickAccessMode();
     $('#cl-setting-quick-icon').val(quickMode).trigger('change');
@@ -2063,6 +2631,10 @@ function saveLocalMirror() {
     // Drop the stale copy rather than leave an outdated one that loadState could prefer later
     try { localStorage.removeItem(KEY); } catch (e) {}
     console.warn(`${LOG_PREFIX} localStorage is full; skipped the local backup copy (settings.json is unaffected).`);
+}
+
+function applyFullscreen(on) {
+    $('#cl-modal').toggleClass('cl-fullscreen', !!on);
 }
 
 function getQuickAccessMode() {
