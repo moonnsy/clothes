@@ -276,19 +276,8 @@
 .cl-checkbox:checked + .cl-checkbox-custom { background: var(--cl-accent); border-color: var(--cl-accent); }
 .cl-checkbox:checked + .cl-checkbox-custom::after { content: '\f00c'; font-family: 'Font Awesome 6 Free'; font-weight: 900; color: #000; font-size: 12px; }
 
-/* Mask Icon Base */
-.cl-custom-icon {
-    display: inline-block;
-    width: 1.25em; height: 1.25em; margin-right: 0;
-    background-color: currentColor;
-    -webkit-mask: url('https://img.icons8.ru/ios-filled/50/clothes.png') no-repeat center / contain;
-    mask: url('https://img.icons8.ru/ios-filled/50/clothes.png') no-repeat center / contain;
-    vertical-align: middle;
-}
+/* Icons are Font Awesome glyphs bundled with SillyTavern, so they work offline */
 #cl-quick-icon {
-    -webkit-mask-size: 18px 18px;
-    mask-size: 18px 18px;
-    transform: translateY(-1px);
     color: var(--SmartThemeBorderColor, currentColor);
     opacity: 0.7;
     transition: opacity 0.2s, color 0.2s;
@@ -322,9 +311,7 @@
     color: var(--cl-accent-hover);
 }
 #cl-quick-fab-icon {
-    width: 24px; height: 24px;
-    -webkit-mask-size: 24px 24px;
-    mask-size: 24px 24px;
+    font-size: 20px;
     pointer-events: none;
 }
 
@@ -575,3 +562,16 @@
     padding-bottom: calc(20px + env(safe-area-inset-bottom, 0px));
 }
 #cl-modal.cl-fullscreen .cl-modal-overlay { border-radius: 0; }
+
+/* Offer to move items filed under another (or a vanished) name */
+.cl-folder-banner {
+    margin-bottom: 15px; padding: 10px 12px;
+    border: 1px dashed var(--cl-border); border-radius: 10px;
+    background: rgba(255,255,255,0.03);
+}
+.cl-folder-banner-text { font-size: 0.82em; color: #D1D5DB; line-height: 1.45; }
+.cl-folder-move {
+    width: auto !important; display: inline-flex !important; vertical-align: top;
+    margin: 8px 6px 0 0 !important; padding: 7px 10px !important; font-size: 0.82em !important;
+}
+.cl-folder-keep { opacity: 0.75; }

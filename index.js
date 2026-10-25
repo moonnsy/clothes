@@ -22,6 +22,8 @@ let clothesState = {
     items: [],
     npcs: [], // NPC names added by hand; names that only appear on items are picked up too
     previewTemplates: {}, // per-category prompt overrides for preview generation
+    entityAliases: {}, // old name -> new name, for characters and personas that were renamed
+    keptFolders: [], // "type:name" of vanished-name folders the user chose not to be offered again
     activeCharItemId: null, // Legacy global fallback
     activeUserItemId: null // Legacy global fallback
 };
@@ -534,7 +536,7 @@ function attachToUI() {
         $('#extensionsMenu').append(`
             <div id="clothes-menu-item-container" class="extension_container interactable" tabindex="0">
                 <div id="clothes-wand-item" class="list-group-item flex-container flexGap5 interactable" tabindex="0" style="align-items: center;">
-                    <i class="fa-fw cl-custom-icon"></i>
+                    <i class="fa-fw fa-solid fa-shirt"></i>
                     <span>Clothes</span>
                 </div>
             </div>
@@ -563,7 +565,8 @@ function buildModal() {
                     </div>
                     <div style="display:flex; align-items:center;">
                         <i class="fa-solid fa-eye-slash cl-settings-icon interactable" id="cl-btn-filter-active" title="Toggle Equipped Items Only" style="margin-right:15px; font-size:1.1em;"></i>
-                        <i class="cl-settings-icon interactable" id="cl-btn-clear-all" title="Unequip All Outfits" style="margin-right:15px; display:inline-block; width:1.1em; height:1.1em; background-color:currentColor; -webkit-mask:url('https://img.icons8.ru/ios-filled/50/cancel-2.png') no-repeat center / contain; mask:url('https://img.icons8.ru/ios-filled/50/cancel-2.png') no-repeat center / contain;"></i>
+                        <i class="fa-solid fa-arrow-down-short-wide cl-settings-icon interactable" id="cl-btn-sort" title="Oldest first (tap for newest first)" style="margin-right:15px; font-size:1.1em;"></i>
+                        <i class="fa-solid fa-ban cl-settings-icon interactable" id="cl-btn-clear-all" title="Unequip All Outfits" style="margin-right:15px; font-size:1.1em;"></i>
                         <i class="fa-solid fa-gear cl-settings-icon interactable" id="cl-btn-settings" title="Settings"></i>
                         <i class="fa-solid fa-xmark cl-close" id="cl-btn-close"></i>
                     </div>
@@ -604,6 +607,7 @@ function buildModal() {
                     <div class="cl-gallery-tags-filter" id="cl-gallery-tags-filter">
                         <!-- Filter tags will be rendered here -->
                     </div>
+                    <div class="cl-folder-banner" id="cl-folder-banner" style="display:none;"></div>
                     <div class="cl-gallery-grid" id="cl-gallery-grid">
                         <!-- Cards go here -->
                     </div>
@@ -1196,6 +1200,12 @@ function bindEvents() {
         renderGallery();
     });
 
+    $('#cl-btn-sort').on('click', function() {
+        localStorage.setItem('clothes_sort', getSortOrder() === 'newest' ? 'oldest' : 'newest');
+        updateSortButton();
+        renderGallery();
+    });
+
     $('#cl-btn-clear-all').on('click', async () => {
         const stContext = getContext();
         if (stContext && stContext.chatMetadata && stContext.chatMetadata[currentMode]) {
@@ -1605,7 +1615,256 @@ function bindEvents() {
     });
 }
 
+// --- RENAMED CHARACTERS AND PERSONAS ---
+// Items are filed under a character's or persona's name (item.folder), and what someone
+// wears in a chat is keyed by that name too. When the name changes, both must follow,
+// or the wardrobe looks empty under the new name and the old one lingers.
+
+/** Names that exist right now: characters for 'char', personas for 'user'. */
+function getExistingNames(type) {
+    const stContext = getContext();
+    if (type === 'user') {
+        const personas = Object.values(stContext.powerUserSettings?.personas || {});
+        return new Set([...personas, stContext.name1].filter(Boolean));
+    }
+    return new Set((stContext.characters || []).map(c => c && c.name).filter(Boolean));
+}
+
+/** Folders of this type whose name belongs to nobody any more, with how many items each holds. */
+function getMissingFolders(type) {
+    const existing = getExistingNames(type);
+    const counts = new Map();
+    clothesState.items.forEach(item => {
+        if (item.type !== type || !item.folder || item.folder === 'Default' || existing.has(item.folder)) return;
+        counts.set(item.folder, (counts.get(item.folder) || 0) + 1);
+    });
+    return counts;
+}
+
+/** Moves what someone wears in the open chat, and their tag filter, to a new name. */
+function moveEntityState(oldName, newName) {
+    const stContext = getContext();
+    const inChat = !!(stContext && stContext.chatMetadata);
+    let changed = false;
+
+    ['clothes', 'location'].forEach(mode => {
+        const entities = getActiveItems(mode);
+        if (entities[oldName] !== undefined) {
+            if (mode === 'clothes') {
+                // Slots the new name already fills are kept; the rest come over
+                entities[newName] = { ...(entities[oldName] || {}), ...(entities[newName] || {}) };
+            } else if (!entities[newName]) {
+                entities[newName] = entities[oldName];
+            }
+            delete entities[oldName];
+            changed = true;
+        }
+
+        const filters = inChat ? stContext.chatMetadata[mode]?.tagFilters : clothesState[`activeTagFilters_${mode}`];
+        if (filters && filters[oldName] !== undefined) {
+            if (filters[newName] === undefined) filters[newName] = filters[oldName];
+            delete filters[oldName];
+            changed = true;
+        }
+    });
+
+    if (changed) {
+        if (inChat && typeof stContext.saveMetadataDebounced === 'function') stContext.saveMetadataDebounced();
+        else if (!inChat) saveState();
+    }
+    return changed;
+}
+
+function resolveAlias(name) {
+    const aliases = clothesState.entityAliases || {};
+    const seen = new Set();
+    let current = name;
+    while (aliases[current] && !seen.has(current)) {
+        seen.add(current);
+        current = aliases[current];
+    }
+    return current;
+}
+
+function recordAlias(oldName, newName) {
+    if (!clothesState.entityAliases) clothesState.entityAliases = {};
+    const aliases = clothesState.entityAliases;
+    delete aliases[newName]; // renamed back: the old entry would now loop
+    aliases[oldName] = newName;
+    // A -> B then B -> C: point A straight at C
+    Object.keys(aliases).forEach(key => { if (aliases[key] === oldName) aliases[key] = newName; });
+}
+
+/**
+ * Other chats still hold what a renamed character wore under the old name, and they
+ * can only be updated once opened. Runs on every chat change.
+ */
+function applyEntityAliases() {
+    const aliases = clothesState.entityAliases;
+    if (!aliases || Object.keys(aliases).length === 0) return;
+
+    // If someone new took the old name, those entries are theirs
+    const existing = new Set([...getExistingNames('char'), ...getExistingNames('user')]);
+    ['clothes', 'location'].forEach(mode => {
+        Object.keys(getActiveItems(mode)).forEach(name => {
+            if (!aliases[name] || existing.has(name)) return;
+            const target = resolveAlias(name);
+            if (target !== name) moveEntityState(name, target);
+        });
+    });
+}
+
+/** Re-files everything a character or persona had under their old name. Returns how many items moved. */
+function renameEntity(oldName, newName, type) {
+    oldName = String(oldName || '').trim();
+    newName = String(newName || '').trim();
+    if (!oldName || !newName || oldName === newName) return 0;
+
+    let moved = 0;
+    clothesState.items.forEach(item => {
+        if (item.type === type && item.folder === oldName) {
+            item.folder = newName;
+            moved++;
+        }
+    });
+    moveEntityState(oldName, newName);
+    recordAlias(oldName, newName);
+
+    saveState();
+    updateContext();
+    updateSTScriptVariables();
+
+    if (currentEntity === oldName) currentEntity = newName;
+    if (currentFolder === oldName) currentFolder = newName;
+    if ($('#cl-modal').is(':visible') && currentView === 'gallery') {
+        renderTabs();
+        renderGallery();
+    }
+    return moved;
+}
+
+function onPersonaRenamed(data) {
+    const moved = renameEntity(data?.oldName, data?.newName, 'user');
+    if (moved > 0) toastr.info(`Clothes: moved ${moved} item${moved === 1 ? '' : 's'} from "${data.oldName}" to "${data.newName}".`);
+}
+
+/**
+ * SillyTavern reports a character rename with avatar file names only, before it reloads
+ * the character list. The old name is read now, the new one once the list has reloaded.
+ */
+function onCharacterRenamed(oldAvatar, newAvatar) {
+    const oldName = getContext().characters?.find(c => c && c.avatar === oldAvatar)?.name;
+    if (!oldName) return;
+
+    const started = Date.now();
+    const poll = () => {
+        const newName = getContext().characters?.find(c => c && c.avatar === newAvatar)?.name;
+        if (newName) {
+            const moved = renameEntity(oldName, newName, 'char');
+            if (moved > 0) toastr.info(`Clothes: moved ${moved} item${moved === 1 ? '' : 's'} from "${oldName}" to "${newName}".`);
+            return;
+        }
+        if (Date.now() - started < 20000) setTimeout(poll, 300);
+    };
+    setTimeout(poll, 300);
+}
+
+/**
+ * Hand a folder's items to the current tab. When the folder's name belongs to nobody
+ * any more it is treated as a rename (wearing state and other chats follow); otherwise
+ * it is a plain transfer of what is shown in the current section.
+ */
+function moveFolderHere(source) {
+    if (!source || source === currentEntity || npcSection) return;
+    const isMissing = getMissingFolders(currentType).has(source);
+
+    let moved;
+    if (isMissing) {
+        moved = renameEntity(source, currentEntity, currentType);
+    } else {
+        moved = 0;
+        clothesState.items.forEach(item => {
+            if (item.type === currentType && item.folder === source && (item.category || 'clothes') === currentMode) {
+                item.folder = currentEntity;
+                moved++;
+            }
+        });
+        saveState();
+    }
+
+    currentFolder = currentEntity;
+    renderGallery();
+    toastr.success(`Moved ${moved} item${moved === 1 ? '' : 's'} from "${source}" to "${currentEntity}".`);
+}
+
+/** The strip above the grid that offers to move items over. */
+function renderFolderBanner(ownItemCount) {
+    const $banner = $('#cl-folder-banner').empty().hide();
+    if (npcSection || filterActiveOnly || !currentEntity) return;
+
+    const missing = getMissingFolders(currentType);
+    const addButton = (source, label) => {
+        $('<button class="cl-btn cl-btn-secondary cl-folder-move"></button>')
+            .html('<i class="fa-solid fa-right-to-bracket"></i> ')
+            .append(document.createTextNode(label))
+            .on('click', () => moveFolderHere(source))
+            .appendTo($banner);
+    };
+
+    if (currentFolder !== 'All' && currentFolder !== currentEntity) {
+        // Looking at someone else's folder: offer to take it over
+        const gone = missing.has(currentFolder);
+        $('<div class="cl-folder-banner-text"></div>')
+            .text(gone
+                ? `"${currentFolder}" no longer exists (renamed or deleted). Its items can move to ${currentEntity}.`
+                : `These items are filed under "${currentFolder}".`)
+            .appendTo($banner);
+        addButton(currentFolder, `Move to ${currentEntity}`);
+        $banner.show();
+        return;
+    }
+
+    // Items under a vanished name, unless the user chose to keep that folder as it is
+    const kept = new Set(clothesState.keptFolders || []);
+    const offers = [...missing.entries()].filter(([name]) => !kept.has(`${currentType}:${name}`));
+    if (currentFolder === currentEntity && offers.length > 0) {
+        $('<div class="cl-folder-banner-text"></div>')
+            .text(ownItemCount === 0
+                ? `Nothing filed under ${currentEntity} yet. Found items under names that no longer exist (renamed or deleted):`
+                : 'Found items under names that no longer exist (renamed or deleted):')
+            .appendTo($banner);
+        offers.slice(0, 4).forEach(([name, count]) => {
+            addButton(name, `Move "${name}" (${count}) here`);
+            $('<button class="cl-btn cl-btn-secondary cl-folder-move cl-folder-keep"></button>')
+                .text('Keep separate')
+                .attr('title', 'Stop offering this. The folder stays in the list above.')
+                .on('click', () => {
+                    if (!clothesState.keptFolders) clothesState.keptFolders = [];
+                    clothesState.keptFolders.push(`${currentType}:${name}`);
+                    saveState();
+                    renderGallery();
+                })
+                .appendTo($banner);
+        });
+        $banner.show();
+    }
+}
+
 // --- GALLERY LOGIC ---
+// Items are kept in the order they were added, so "newest first" is that order reversed
+function getSortOrder() {
+    return localStorage.getItem('clothes_sort') === 'newest' ? 'newest' : 'oldest';
+}
+
+function updateSortButton() {
+    const newest = getSortOrder() === 'newest';
+    $('#cl-btn-sort')
+        .toggleClass('fa-arrow-down-wide-short', newest)
+        .toggleClass('fa-arrow-down-short-wide', !newest)
+        .css('color', newest ? 'var(--cl-accent)' : '')
+        .attr('title', newest ? 'Newest first (tap for oldest first)' : 'Oldest first (tap for newest first)');
+}
+
 function renderGallery() {
     const $grid = $('#cl-gallery-grid');
     $grid.empty();
@@ -1615,6 +1874,7 @@ function renderGallery() {
         $('#cl-gallery-tags-filter').hide();
         $('#cl-folder-wrapper').hide();
         $('#cl-subcategory-wrapper').hide();
+        $('#cl-folder-banner').hide();
         $grid.append('<div class="cl-npc-empty">Add an NPC above, or tap one of the names from your image references, to start building their wardrobe.</div>');
         return;
     }
@@ -1632,8 +1892,10 @@ function renderGallery() {
     const $folderSelect = $('#cl-folder-select');
     $folderSelect.empty();
     $folderSelect.append(`<option value="All">All ${currentMode === 'location' ? 'Locations' : 'Outfits'}</option>`);
+    const missingFolders = npcSection ? new Map() : getMissingFolders(currentType);
     Array.from(folders).sort().forEach(f => {
-        $folderSelect.append(`<option value="${escapeHtml(f)}">${escapeHtml(f)}</option>`);
+        const label = missingFolders.has(f) ? `${f} (no longer exists)` : f;
+        $folderSelect.append(`<option value="${escapeHtml(f)}">${escapeHtml(label)}</option>`);
     });
 
     if (currentFolder !== 'All' && !folders.has(currentFolder)) {
@@ -1647,9 +1909,11 @@ function renderGallery() {
     $grid.addClass(`cl-grid-col-${gridSetting}`);
 
     // Filter Items by Folder
-    const folderItems = currentFolder === 'All' 
-        ? tabItems 
+    const folderItems = currentFolder === 'All'
+        ? tabItems
         : tabItems.filter(item => item.folder === currentFolder);
+
+    renderFolderBanner(folderItems.length);
 
     // Filter by SubCategory (if clothes mode)
     const subCatItems = currentMode === 'clothes' && currentSubCategory !== 'all'
@@ -1747,6 +2011,8 @@ function renderGallery() {
         $('#cl-folder-wrapper').toggle(!npcSection);
         if (currentMode === 'clothes') $('#cl-subcategory-wrapper').show();
     }
+
+    if (getSortOrder() === 'newest') displayItems = [...displayItems].reverse();
 
     displayItems.forEach(item => {
         const activeItems = getActiveItems(currentMode);
@@ -2466,6 +2732,12 @@ function adoptExtraState(source) {
     if (source.previewTemplates && typeof source.previewTemplates === 'object' && !Array.isArray(source.previewTemplates)) {
         clothesState.previewTemplates = source.previewTemplates;
     }
+    if (source.entityAliases && typeof source.entityAliases === 'object' && !Array.isArray(source.entityAliases)) {
+        clothesState.entityAliases = source.entityAliases;
+    }
+    if (Array.isArray(source.keptFolders)) {
+        clothesState.keptFolders = source.keptFolders.filter(k => typeof k === 'string');
+    }
 }
 
 function loadState() {
@@ -2545,6 +2817,7 @@ function loadState() {
     $('#cl-setting-loc-inject').val(locInject).trigger('change');
     
     $('#cl-setting-multi-tag').prop('checked', isMultiTagEnabled());
+    updateSortButton();
     const fullscreen = localStorage.getItem('clothes_fullscreen') === 'true';
     $('#cl-setting-fullscreen').prop('checked', fullscreen);
     applyFullscreen(fullscreen);
@@ -2658,7 +2931,7 @@ function toggleQuickIcon(show) {
                 if ($btn.length) {
                     // We match the exact classes of the wand button so it inherits hover states and alignment naturally
                     $btn.after(`
-                        <div id="cl-quick-icon" title="Clothes" class="fa-solid interactable cl-custom-icon" style="cursor:pointer; order: 99;" tabindex="0"></div>
+                        <div id="cl-quick-icon" title="Clothes" class="fa-solid fa-shirt interactable" style="cursor:pointer; order: 99;" tabindex="0"></div>
                     `);
                     $('#cl-quick-icon').on('click', () => {
                         $('#clothes-wand-item').trigger('click');
@@ -2696,7 +2969,7 @@ function createClothesFab() {
 
     $(`
         <div id="cl-quick-fab" title="Clothes (drag to move)">
-            <i class="cl-custom-icon" id="cl-quick-fab-icon"></i>
+            <i class="fa-solid fa-shirt" id="cl-quick-fab-icon"></i>
         </div>
     `).appendTo('body');
 
@@ -2922,14 +3195,21 @@ function initializeExtension() {
     attachToUI();
     buildModal();
     loadState();
+    applyEntityAliases();
     updateSTScriptVariables();
     updateContext();
-    
+
     if (typeof eventSource !== 'undefined') {
         eventSource.on(event_types.CHAT_CHANGED, () => {
+            applyEntityAliases();
             updateContext();
             updateSTScriptVariables();
         });
+
+        // Follow renames, so the wardrobe stays with the character or persona.
+        // Guarded: older SillyTavern builds do not have these events.
+        if (event_types.PERSONA_RENAMED) eventSource.on(event_types.PERSONA_RENAMED, onPersonaRenamed);
+        if (event_types.CHARACTER_RENAMED) eventSource.on(event_types.CHARACTER_RENAMED, onCharacterRenamed);
         
         // Hook into prompt assembly to inject location images for multimodal
         eventSource.on(event_types.CHAT_COMPLETION_PROMPT_READY, async (eventData) => {
