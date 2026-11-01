@@ -24,6 +24,7 @@ let clothesState = {
     previewTemplates: {}, // per-category prompt overrides for preview generation
     entityAliases: {}, // old name -> new name, for characters and personas that were renamed
     keptFolders: [], // "type:name" of vanished-name folders the user chose not to be offered again
+    catalogUrl: '', // the outfit catalog site; empty means DEFAULT_CATALOG_URL
     activeCharItemId: null, // Legacy global fallback
     activeUserItemId: null // Legacy global fallback
 };
@@ -542,13 +543,69 @@ function attachToUI() {
             </div>
         `);
         $('#clothes-wand-item').on('click', () => {
-            $('#cl-modal').css('display', 'block');
+            showModalOnTop();
             currentView = 'gallery';
             
             renderTabs();
             loadProfiles();
             switchTab();
+            if (catalogSection) openCatalogView(); // reopen where the user left off
         });
+    }
+}
+
+/*
+ * The modal opens in the browser's top layer (popover API). Some themes and
+ * extensions put a transform or perspective on <html> or <body>; then a
+ * position: fixed modal inside <body> is measured from the page instead of
+ * the screen and opens somewhere at the bottom. The top layer ignores all of
+ * that and is drawn above everything, including other extensions' overlays.
+ * Toasts are lifted after it so they stay visible.
+ */
+const canUseTopLayer = typeof HTMLElement !== 'undefined' && 'showPopover' in HTMLElement.prototype;
+let toastWatcher = null;
+
+function liftToasts() {
+    const box = document.getElementById('toast-container');
+    if (!box || !canUseTopLayer) return;
+    if (!box.hasAttribute('popover')) box.setAttribute('popover', 'manual');
+    try {
+        if (box.matches(':popover-open')) box.hidePopover();
+        box.showPopover();
+    } catch (e) { /* the container is gone or the browser is old */ }
+}
+
+function showModalOnTop() {
+    const modal = document.getElementById('cl-modal');
+    if (!modal) return;
+    modal.style.display = 'block';
+    if (!canUseTopLayer) return;
+    if (!modal.hasAttribute('popover')) modal.setAttribute('popover', 'manual');
+    try {
+        if (modal.matches(':popover-open')) modal.hidePopover();
+        modal.showPopover();
+    } catch (e) { /* stays a normal fixed overlay */ }
+    liftToasts();
+    if (!toastWatcher && document.body) {
+        toastWatcher = new MutationObserver((list) => {
+            if (modal.matches(':popover-open') && list.some(m => [...m.addedNodes].some(n => n.id === 'toast-container'))) liftToasts();
+        });
+        toastWatcher.observe(document.body, { childList: true });
+    }
+}
+
+function hideModalFromTop() {
+    const modal = document.getElementById('cl-modal');
+    if (!modal) return;
+    modal.style.display = 'none';
+    try {
+        if (modal.matches(':popover-open')) modal.hidePopover();
+    } catch (e) { /* nothing to undo */ }
+    modal.removeAttribute('popover');
+    const box = document.getElementById('toast-container');
+    if (box?.hasAttribute('popover')) {
+        try { if (box.matches(':popover-open')) box.hidePopover(); } catch (e) { /* ignore */ }
+        box.removeAttribute('popover');
     }
 }
 
@@ -562,8 +619,11 @@ function buildModal() {
                         <button class="cl-mode-btn active" data-mode="clothes" title="Clothes" aria-label="Clothes"><i class="fa-solid fa-shirt"></i></button>
                         <button class="cl-mode-btn" data-mode="location" title="Locations" aria-label="Locations"><i class="fa-solid fa-map-location-dot"></i></button>
                         <button class="cl-mode-btn" data-mode="npc" title="NPC wardrobe" aria-label="NPC wardrobe"><i class="fa-solid fa-user-group"></i></button>
+                        <button class="cl-mode-btn" data-mode="catalog" title="Outfit catalog" aria-label="Outfit catalog"><i class="fa-solid fa-book-open"></i></button>
                     </div>
                     <div style="display:flex; align-items:center;">
+                        <i class="fa-solid fa-arrow-up-right-from-square cl-settings-icon interactable" id="cl-btn-catalog-open" title="Open the catalog in a new tab" style="margin-right:15px; font-size:1.05em; display:none;"></i>
+                        <i class="fa-solid fa-rotate-right cl-settings-icon interactable" id="cl-btn-catalog-reload" title="Reload the catalog" style="margin-right:15px; font-size:1.05em; display:none;"></i>
                         <i class="fa-solid fa-eye-slash cl-settings-icon interactable" id="cl-btn-filter-active" title="Toggle Equipped Items Only" style="margin-right:15px; font-size:1.1em;"></i>
                         <i class="fa-solid fa-arrow-down-short-wide cl-settings-icon interactable" id="cl-btn-sort" title="Oldest first (tap for newest first)" style="margin-right:15px; font-size:1.1em;"></i>
                         <i class="fa-solid fa-ban cl-settings-icon interactable" id="cl-btn-clear-all" title="Unequip All Outfits" style="margin-right:15px; font-size:1.1em;"></i>
@@ -611,6 +671,14 @@ function buildModal() {
                     <div class="cl-gallery-grid" id="cl-gallery-grid">
                         <!-- Cards go here -->
                     </div>
+                </div>
+
+                <!-- CATALOG VIEW: the outfit catalog site, embedded -->
+                <div class="cl-content cl-view" id="cl-view-catalog">
+                    <div class="cl-catalog-empty" id="cl-catalog-empty" style="display:none;">
+                        No catalog address yet. Add it in Settings → Outfit Catalog.
+                    </div>
+                    <iframe id="cl-catalog-frame" title="Outfit catalog" allow="clipboard-write; clipboard-read; fullscreen" referrerpolicy="no-referrer"></iframe>
                 </div>
 
                 <!-- EDIT VIEW -->
@@ -762,6 +830,14 @@ function buildModal() {
                     </div>
                     <button id="cl-btn-test-profile" class="cl-btn cl-btn-secondary" style="margin-top: 10px;">Test Connection</button>
                     <div id="cl-api-status" class="cl-status-text"></div>
+
+                    <hr style="border:0; border-top:1px solid rgba(255,255,255,0.05); margin:20px 0 15px 0;">
+
+                    <span class="cl-label">Outfit Catalog</span>
+                    <input type="text" id="cl-setting-catalog-url" class="cl-input-field" placeholder="https://ann22cadis.github.io/outfit-catalog/" autocomplete="off" spellcheck="false">
+                    <p style="font-size:0.8em; color:#9CA3AF; margin:6px 0 0 0; line-height:1.4;">
+                        The site opened by the <i class="fa-solid fa-book-open"></i> tab. Leave empty for the default address.
+                    </p>
 
                     <hr style="border:0; border-top:1px solid rgba(255,255,255,0.05); margin:20px 0 15px 0;">
 
@@ -1127,6 +1203,53 @@ function removeCurrentNpc() {
     switchTab(currentEntity, 'npc');
 }
 
+// --- OUTFIT CATALOG ---
+// Anya's catalog site, shown as is in a frame: pieces are browsed, combined and copied
+// there. The wardrobe only opens it.
+const DEFAULT_CATALOG_URL = 'https://ann22cadis.github.io/outfit-catalog/';
+let catalogSection = false;
+
+function getCatalogUrl() {
+    const raw = String(clothesState.catalogUrl || '').trim();
+    return raw || DEFAULT_CATALOG_URL;
+}
+
+/** Only an http(s) address goes into the frame. */
+function safeCatalogUrl() {
+    try {
+        const url = new URL(getCatalogUrl());
+        return /^https?:$/.test(url.protocol) ? url.href : '';
+    } catch (e) {
+        return '';
+    }
+}
+
+function openCatalogView(forceReload) {
+    const url = safeCatalogUrl();
+    let frame = document.getElementById('cl-catalog-frame');
+    $('#cl-catalog-empty').toggle(!url);
+    // Loaded when the tab is first opened, not with the page: the site pulls in lots of pictures
+    if (url && (forceReload || frame.dataset.src !== url)) {
+        // A fresh frame each time: once a frame has landed on an error page, browsers may
+        // keep refusing to navigate it, and Reload would show the same blank page
+        const fresh = frame.cloneNode(false);
+        fresh.removeAttribute('src');
+        fresh.dataset.src = url;
+        frame.replaceWith(fresh);
+        fresh.src = url;
+        frame = fresh;
+    }
+    $(frame).toggle(!!url);
+    showView('catalog');
+}
+
+/** The catalog has no characters or items of ours: hide their tabs and buttons there. */
+function updateSectionChrome() {
+    $('.cl-tabs').toggle(!catalogSection);
+    $('#cl-btn-filter-active, #cl-btn-sort, #cl-btn-clear-all').toggle(!catalogSection);
+    $('#cl-btn-catalog-open, #cl-btn-catalog-reload').toggle(catalogSection);
+}
+
 /**
  * Switches between the Clothes, Locations and NPC sections. Clothes and NPC share
  * the same data and screens; NPC just scopes it to one NPC instead of the chat's
@@ -1176,7 +1299,25 @@ function bindEvents() {
     $(document).on('click', '.cl-mode-btn', function() {
         $('.cl-mode-btn').removeClass('active');
         $(this).addClass('active');
-        applySection($(this).data('mode'));
+        const mode = $(this).data('mode');
+        catalogSection = mode === 'catalog';
+        updateSectionChrome();
+        if (catalogSection) {
+            openCatalogView();
+            return;
+        }
+        applySection(mode);
+    });
+
+    $('#cl-btn-catalog-open').on('click', () => {
+        const url = safeCatalogUrl();
+        if (url) window.open(url, '_blank', 'noopener');
+    });
+    $('#cl-btn-catalog-reload').on('click', () => openCatalogView(true));
+
+    $('#cl-setting-catalog-url').on('change', function() {
+        clothesState.catalogUrl = String($(this).val() || '').trim();
+        saveState();
     });
 
     // NPC picker
@@ -1222,7 +1363,7 @@ function bindEvents() {
     });
 
     $('#cl-btn-close').on('click', () => {
-        $('#cl-modal').css('display', 'none');
+        hideModalFromTop();
         saveState();
         updateContext();
     });
@@ -2573,7 +2714,6 @@ async function describeImageEdit() {
             const profile = profiles.find(p => p.name === activeProfileName);
             if (!profile) throw new Error(`Profile '${activeProfileName}' not found.`);
 
-            const cc_source = profile.api || 'openai';
             const contentParts = [{ type: 'text', text: prompt }];
             allImages.forEach(imgB64 => {
                 contentParts.push({ type: 'image_url', image_url: { url: imgB64 } });
@@ -2585,51 +2725,11 @@ async function describeImageEdit() {
 
             const maxTokensRaw = localStorage.getItem(currentMode === 'location' ? 'location_max_tokens' : 'clothes_max_tokens') || '4000';
             const maxTokens = parseInt(maxTokensRaw, 10);
-            let generate_data = {
-                'messages': messages,
-                'model': profile.model,
-                'temperature': 0.7,
-                'max_tokens': maxTokens,
-                'stream': false,
-                'chat_completion_source': cc_source,
-            };
-            
-            const profileApiValue = profile['api-url'];
-            const ccSettings = stContext.chatCompletionSettings || {};
-            
-            if (cc_source === 'custom' && profileApiValue) {
-                generate_data['custom_url'] = profileApiValue.trim().replace(/\/+$/, '');
-            } else if (cc_source === 'vertexai' && profileApiValue) {
-                generate_data['vertexai_region'] = profileApiValue;
-                if (ccSettings.vertexai_auth_mode) generate_data['vertexai_auth_mode'] = ccSettings.vertexai_auth_mode;
-                if (ccSettings.vertexai_express_project_id) generate_data['vertexai_express_project_id'] = ccSettings.vertexai_express_project_id;
-            } else if (cc_source === 'zai' && profileApiValue) {
-                generate_data['zai_endpoint'] = profileApiValue;
-            }
 
-            const headers = (typeof stContext.getRequestHeaders === 'function') ? stContext.getRequestHeaders() : {'Content-Type': 'application/json'};
-            const res = await fetch('/api/backends/chat-completions/generate', {
-                method: 'POST',
-                headers: headers,
-                body: JSON.stringify(generate_data)
-            });
-            
-            if (!res.ok) {
-                const err = await res.json().catch(() => ({error: {message: "Unknown API error"}}));
-                throw new Error(err.error?.message || 'Check console');
-            }
+            resultText = await sendProfileRequest(profile, messages, maxTokens, 0.7);
 
-            const json = await res.json();
-            
-            if (json.error) {
-                throw new Error(json.error.message || JSON.stringify(json.error));
-            }
-
-            resultText = json.choices?.[0]?.message?.content || json.reply || '';
-            
             if (!resultText) {
-                console.error("Clothes Ext API Response:", json);
-                throw new Error("API returned an empty response. Check console for full payload. (Could be safety filter or unsupported vision).");
+                throw new Error("API returned an empty response. (Could be safety filter or unsupported vision).");
             }
         }
 
@@ -2671,6 +2771,37 @@ function loadProfiles() {
     }
 }
 
+// Goes through SillyTavern's own request service, which sends the profile's key, proxy and
+// endpoint. Without them the server falls back to whichever key is active for that
+// provider, so the result would depend on what the tavern is currently switched to.
+async function sendProfileRequest(profile, messages, maxTokens, temperature) {
+    const stContext = getContext();
+    const requestService = stContext.ConnectionManagerRequestService;
+    if (!requestService) throw new Error("This SillyTavern version can't send requests through a profile. Update it or use Tavern Main API.");
+
+    const ccSettings = stContext.chatCompletionSettings || {};
+    const overrides = { temperature };
+    const profileApiValue = profile['api-url'];
+
+    if (profile.api === 'custom') {
+        if (profileApiValue) overrides['custom_url'] = profileApiValue.trim().replace(/\/+$/, '');
+        if (ccSettings.custom_include_body) overrides['custom_include_body'] = ccSettings.custom_include_body;
+        if (ccSettings.custom_exclude_body) overrides['custom_exclude_body'] = ccSettings.custom_exclude_body;
+        if (ccSettings.custom_include_headers) overrides['custom_include_headers'] = ccSettings.custom_include_headers;
+    } else if (profile.api === 'vertexai') {
+        if (ccSettings.vertexai_auth_mode) overrides['vertexai_auth_mode'] = ccSettings.vertexai_auth_mode;
+        if (ccSettings.vertexai_express_project_id) overrides['vertexai_express_project_id'] = ccSettings.vertexai_express_project_id;
+    }
+
+    try {
+        const result = await requestService.sendRequest(profile.id, messages, maxTokens, { includePreset: false }, overrides);
+        return result?.content || '';
+    } catch (e) {
+        // The service wraps everything as 'API request failed'; the reason is in the cause
+        throw e.cause || e;
+    }
+}
+
 async function testAPIProfile() {
     const stContext = getContext();
     if (!activeProfileName) {
@@ -2683,43 +2814,7 @@ async function testAPIProfile() {
     const profile = profiles.find(p => p.name === activeProfileName);
     if (!profile) throw new Error("Profile not found.");
 
-    const cc_source = profile.api || 'openai';
-    let generate_data = {
-        'messages': [{ role: 'user', content: 'respond with "ok"' }],
-        'model': profile.model,
-        'temperature': 0.3,
-        'stream': false,
-        'chat_completion_source': cc_source,
-    };
-    
-    const profileApiValue = profile['api-url'];
-    const ccSettings = stContext.chatCompletionSettings || {};
-    
-    if (cc_source === 'custom' && profileApiValue) {
-        generate_data['custom_url'] = profileApiValue.trim().replace(/\/+$/, '');
-        if (ccSettings.custom_prompt_post_processing) generate_data['custom_prompt_post_processing'] = ccSettings.custom_prompt_post_processing;
-        if (ccSettings.custom_include_body) generate_data['custom_include_body'] = ccSettings.custom_include_body;
-        if (ccSettings.custom_exclude_body) generate_data['custom_exclude_body'] = ccSettings.custom_exclude_body;
-        if (ccSettings.custom_include_headers) generate_data['custom_include_headers'] = ccSettings.custom_include_headers;
-    } else if (cc_source === 'vertexai' && profileApiValue) {
-        generate_data['vertexai_region'] = profileApiValue;
-        if (ccSettings.vertexai_auth_mode) generate_data['vertexai_auth_mode'] = ccSettings.vertexai_auth_mode;
-        if (ccSettings.vertexai_express_project_id) generate_data['vertexai_express_project_id'] = ccSettings.vertexai_express_project_id;
-    } else if (cc_source === 'zai' && profileApiValue) {
-        generate_data['zai_endpoint'] = profileApiValue;
-    }
-
-    const headers = (typeof stContext.getRequestHeaders === 'function') ? stContext.getRequestHeaders() : {'Content-Type': 'application/json'};
-    const res = await fetch('/api/backends/chat-completions/generate', {
-        method: 'POST',
-        headers: headers,
-        body: JSON.stringify(generate_data)
-    });
-    
-    if (!res.ok) {
-        const err = await res.json().catch(() => ({error: {message: "Unknown error"}}));
-        throw new Error(err.error?.message || 'Check console');
-    }
+    await sendProfileRequest(profile, [{ role: 'user', content: 'respond with "ok"' }], 100, 0.3);
 }
 
 // --- STATE AND CONTEXT ---
@@ -2737,6 +2832,9 @@ function adoptExtraState(source) {
     }
     if (Array.isArray(source.keptFolders)) {
         clothesState.keptFolders = source.keptFolders.filter(k => typeof k === 'string');
+    }
+    if (typeof source.catalogUrl === 'string') {
+        clothesState.catalogUrl = source.catalogUrl;
     }
 }
 
@@ -2817,6 +2915,7 @@ function loadState() {
     $('#cl-setting-loc-inject').val(locInject).trigger('change');
     
     $('#cl-setting-multi-tag').prop('checked', isMultiTagEnabled());
+    $('#cl-setting-catalog-url').val(clothesState.catalogUrl || '');
     updateSortButton();
     const fullscreen = localStorage.getItem('clothes_fullscreen') === 'true';
     $('#cl-setting-fullscreen').prop('checked', fullscreen);

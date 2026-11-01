@@ -543,6 +543,9 @@
 /* ==========================================
    Fullscreen (Settings -> Fullscreen)
    ========================================== */
+/* Top layer: drop the browser's default popover box (margins, border, white background). */
+#cl-modal[popover] { margin: 0; padding: 0; border: 0; overflow: visible; color: inherit; max-width: none; max-height: none; }
+:where(#toast-container[popover]) { margin: 0; padding: 0; border: 0; background: transparent; color: inherit; overflow: visible; inset: auto; width: auto; height: auto; }
 #cl-modal.cl-fullscreen { background-color: var(--cl-bg-primary) !important; }
 #cl-modal.cl-fullscreen .cl-flex-center { padding: 0; }
 #cl-modal.cl-fullscreen .cl-flex-container {
@@ -575,3 +578,15 @@
     margin: 8px 6px 0 0 !important; padding: 7px 10px !important; font-size: 0.82em !important;
 }
 .cl-folder-keep { opacity: 0.75; }
+
+/* Outfit catalog: the site fills the whole content area */
+#cl-view-catalog.active { display: flex; flex-direction: column; padding: 0; overflow: hidden; }
+#cl-catalog-frame { flex: 1; width: 100%; min-height: 0; border: 0; background: var(--cl-bg-primary); }
+.cl-catalog-empty { padding: 40px 20px; text-align: center; color: #9CA3AF; font-size: 0.9em; line-height: 1.5; }
+
+/* Four section buttons and four header icons on a phone-width header */
+@media (max-width: 480px) {
+    .cl-header { padding-left: 10px; padding-right: 10px; gap: 4px; }
+    .cl-mode-btn { padding: 7px 7px; }
+    .cl-settings-icon { margin-right: 7px; }
+}
