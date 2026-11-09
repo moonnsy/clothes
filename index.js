@@ -923,10 +923,24 @@ function buildModal() {
                 </div>
             </div>
         </div>
+
+        <!-- Full-screen preview viewer -->
+        <div id="cl-image-viewer" style="display:none;">
+            <div class="cl-viewer-stage" id="cl-viewer-stage">
+                <img id="cl-viewer-img" alt="Preview" draggable="false">
+            </div>
+            <div class="cl-viewer-tools">
+                <button class="cl-viewer-btn" id="cl-viewer-zoom-out" title="Zoom out"><i class="fa-solid fa-magnifying-glass-minus"></i></button>
+                <button class="cl-viewer-btn" id="cl-viewer-reset" title="Fit to screen"><i class="fa-solid fa-expand"></i></button>
+                <button class="cl-viewer-btn" id="cl-viewer-zoom-in" title="Zoom in"><i class="fa-solid fa-magnifying-glass-plus"></i></button>
+            </div>
+            <button class="cl-viewer-btn cl-viewer-close" id="cl-viewer-close" title="Close"><i class="fa-solid fa-xmark"></i></button>
+        </div>
     </div>
     `).appendTo('body');
 
     bindEvents();
+    bindImageViewer();
     clInitCustomSelects();
 }
 
@@ -2266,6 +2280,7 @@ function renderGallery() {
                     <div class="cl-card-title" title="${item.name}">${item.name || fallbackName}</div>
                 </div>
                 <div class="cl-card-actions">
+                    ${item.preview ? '<button class="cl-card-btn cl-btn-zoom" title="View preview full screen"><i class="fa-solid fa-expand"></i></button>' : ''}
                     <button class="cl-card-btn cl-btn-edit"><i class="fa-solid fa-pen"></i></button>
                     <button class="cl-card-btn cl-card-btn-del cl-btn-del"><i class="fa-solid fa-trash"></i></button>
                 </div>
@@ -2298,6 +2313,11 @@ function renderGallery() {
             }
         });
 
+        $card.find('.cl-btn-zoom').on('click', (e) => {
+            e.stopPropagation();
+            openImageViewer(item.preview);
+        });
+
         // Edit
         $card.find('.cl-btn-edit').on('click', (e) => {
             e.stopPropagation();
@@ -2313,6 +2333,173 @@ function renderGallery() {
 
         $grid.append($card);
     });
+}
+
+// --- PREVIEW VIEWER ---
+// Full-screen look at a generated preview. Wheel or pinch zooms, dragging moves the
+// zoomed picture, a double tap zooms in or back out. ✕, Esc or a tap beside the
+// picture closes it.
+const VIEWER_MAX_SCALE = 8;
+const viewer = { scale: 1, x: 0, y: 0, pointers: new Map(), gesture: null, moved: false, lastTap: 0 };
+
+function openImageViewer(src) {
+    if (!src) return;
+    Object.assign(viewer, { scale: 1, x: 0, y: 0, gesture: null, moved: false, lastTap: 0 });
+    viewer.pointers.clear();
+    $('#cl-viewer-img').attr('src', src);
+    applyViewerTransform();
+    $('#cl-image-viewer').css('display', 'flex');
+}
+
+function closeImageViewer() {
+    $('#cl-image-viewer').hide();
+    $('#cl-viewer-img').attr('src', '');
+}
+
+function isViewerOpen() {
+    return $('#cl-image-viewer').is(':visible');
+}
+
+/** Keeps a zoomed picture from being dragged off screen; at fit size it stays centred. */
+function clampViewer() {
+    const img = document.getElementById('cl-viewer-img');
+    const stage = document.getElementById('cl-viewer-stage');
+    const maxX = Math.max(0, (img.offsetWidth * viewer.scale - stage.clientWidth) / 2);
+    const maxY = Math.max(0, (img.offsetHeight * viewer.scale - stage.clientHeight) / 2);
+    viewer.x = Math.min(maxX, Math.max(-maxX, viewer.x));
+    viewer.y = Math.min(maxY, Math.max(-maxY, viewer.y));
+}
+
+function applyViewerTransform() {
+    clampViewer();
+    document.getElementById('cl-viewer-img').style.transform = `translate(${viewer.x}px, ${viewer.y}px) scale(${viewer.scale})`;
+}
+
+/** Point on screen relative to the stage centre, which is where the picture's centre sits at rest. */
+function viewerPoint(clientX, clientY) {
+    const r = document.getElementById('cl-viewer-stage').getBoundingClientRect();
+    return { x: clientX - (r.left + r.width / 2), y: clientY - (r.top + r.height / 2) };
+}
+
+/** Zooms so that the spot under the given screen point stays under it. */
+function zoomViewerAt(clientX, clientY, newScale) {
+    const scale = Math.min(VIEWER_MAX_SCALE, Math.max(1, newScale));
+    const p = viewerPoint(clientX, clientY);
+    viewer.x = p.x - (p.x - viewer.x) * (scale / viewer.scale);
+    viewer.y = p.y - (p.y - viewer.y) * (scale / viewer.scale);
+    viewer.scale = scale;
+    applyViewerTransform();
+}
+
+function zoomViewerCentre(factor) {
+    const r = document.getElementById('cl-viewer-stage').getBoundingClientRect();
+    zoomViewerAt(r.left + r.width / 2, r.top + r.height / 2, viewer.scale * factor);
+}
+
+function startViewerGesture() {
+    const pts = [...viewer.pointers.values()];
+    if (pts.length >= 2) {
+        const [a, b] = pts;
+        const mid = viewerPoint((a.x + b.x) / 2, (a.y + b.y) / 2);
+        viewer.gesture = {
+            type: 'pinch', dist: Math.hypot(a.x - b.x, a.y - b.y) || 1,
+            scale: viewer.scale, x: viewer.x, y: viewer.y, mid,
+        };
+    } else if (pts.length === 1) {
+        viewer.gesture = { type: 'drag', startX: pts[0].x, startY: pts[0].y, x: viewer.x, y: viewer.y };
+    } else {
+        viewer.gesture = null;
+    }
+}
+
+function bindImageViewer() {
+    const stage = document.getElementById('cl-viewer-stage');
+
+    stage.addEventListener('pointerdown', (e) => {
+        try { stage.setPointerCapture(e.pointerId); } catch { /* pointer already gone */ }
+        viewer.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+        if (viewer.pointers.size === 1) viewer.moved = false;
+        else viewer.moved = true; // a second finger is a pinch, never a tap
+        startViewerGesture();
+    });
+
+    stage.addEventListener('pointermove', (e) => {
+        if (!viewer.pointers.has(e.pointerId)) return;
+        viewer.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+        const g = viewer.gesture;
+        if (!g) return;
+        if (g.type === 'pinch') {
+            const [a, b] = [...viewer.pointers.values()];
+            const scale = Math.min(VIEWER_MAX_SCALE, Math.max(1, g.scale * Math.hypot(a.x - b.x, a.y - b.y) / g.dist));
+            const mid = viewerPoint((a.x + b.x) / 2, (a.y + b.y) / 2);
+            // The picture point that was under the fingers' midpoint follows the midpoint
+            viewer.x = mid.x - (g.mid.x - g.x) * (scale / g.scale);
+            viewer.y = mid.y - (g.mid.y - g.y) * (scale / g.scale);
+            viewer.scale = scale;
+            applyViewerTransform();
+        } else {
+            const dx = e.clientX - g.startX;
+            const dy = e.clientY - g.startY;
+            if (Math.abs(dx) > 5 || Math.abs(dy) > 5) viewer.moved = true;
+            if (viewer.scale > 1) {
+                viewer.x = g.x + dx;
+                viewer.y = g.y + dy;
+                applyViewerTransform();
+            }
+        }
+    });
+
+    const endPointer = (e) => {
+        if (!viewer.pointers.has(e.pointerId)) return;
+        viewer.pointers.delete(e.pointerId);
+        startViewerGesture(); // one finger left after a pinch carries on as a drag
+        if (viewer.pointers.size || viewer.moved || e.type === 'pointercancel') return;
+
+        // The stage captures the pointer, so e.target is always the stage: test by position
+        const r = document.getElementById('cl-viewer-img').getBoundingClientRect();
+        const onPicture = e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
+        if (!onPicture) {
+            closeImageViewer();
+            return;
+        }
+        const now = Date.now();
+        if (now - viewer.lastTap < 300) {
+            viewer.lastTap = 0;
+            if (viewer.scale > 1) {
+                Object.assign(viewer, { scale: 1, x: 0, y: 0 });
+                applyViewerTransform();
+            } else {
+                zoomViewerAt(e.clientX, e.clientY, 2.5);
+            }
+        } else {
+            viewer.lastTap = now;
+        }
+    };
+    stage.addEventListener('pointerup', endPointer);
+    stage.addEventListener('pointercancel', endPointer);
+
+    stage.addEventListener('wheel', (e) => {
+        e.preventDefault();
+        zoomViewerAt(e.clientX, e.clientY, viewer.scale * Math.exp(-e.deltaY * 0.0015));
+    }, { passive: false });
+
+    $('#cl-viewer-zoom-in').on('click', () => zoomViewerCentre(1.5));
+    $('#cl-viewer-zoom-out').on('click', () => zoomViewerCentre(1 / 1.5));
+    $('#cl-viewer-reset').on('click', () => {
+        Object.assign(viewer, { scale: 1, x: 0, y: 0 });
+        applyViewerTransform();
+    });
+    $('#cl-viewer-close').on('click', closeImageViewer);
+
+    // Capture phase, so Esc closes only the viewer and not the wardrobe behind it
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && isViewerOpen()) {
+            e.preventDefault();
+            e.stopPropagation();
+            closeImageViewer();
+        }
+    }, true);
+    $(window).on('resize', () => { if (isViewerOpen()) applyViewerTransform(); });
 }
 
 // --- EDIT LOGIC ---
@@ -2527,7 +2714,9 @@ function renderPreviewBlock() {
     const item = editingItemId ? clothesState.items.find(i => i.id === editingItemId) : null;
     const $box = $('#cl-preview-box').empty();
     if (item && item.preview) {
-        $box.append($('<img class="cl-preview-img" alt="Preview">').attr('src', item.preview));
+        $box.append($('<img class="cl-preview-img" alt="Preview" title="Tap to view full screen">')
+            .attr('src', item.preview)
+            .on('click', () => openImageViewer(item.preview)));
     } else {
         $box.append('<i class="fa-regular fa-image"></i>');
     }
@@ -2741,6 +2930,8 @@ async function describeImageEdit() {
         const subCat = $('#cl-subcategory-edit').val() || 'outfit';
         let prompt = "";
         
+        // Models tend to drop lengths ("a black dress"), and then the RP and the previews guess wrong
+        const outfitLengthRule = "\n\nLENGTH IS MANDATORY: for every garment, explicitly state its length using clear terms — tops and jackets: cropped, waist-length, hip-length, thigh-length, knee-length, ankle-length; skirts, dresses and coats: micro, mini, above-the-knee, knee-length, midi, tea-length, ankle-length, floor-length, with a train; trousers and shorts: short shorts, bermuda, cropped, ankle-length, full-length; sleeves: sleeveless, cap, short, elbow-length, three-quarter, long, extra-long. Also state the fit or silhouette (fitted, loose, oversized, A-line, bodycon, flowing). If the frame cuts a garment off, give the most likely length judging by its cut and drape instead of leaving it out.";
         const strictNegative = "\n\nCRITICAL RESTRICTION: DO NOT under ANY circumstances describe the person's physical features. DO NOT describe hair color, eye color, skin tone, moles, freckles, body shape, or age. Focus ONLY on the requested items.";
         
         if (currentMode === 'location') {
@@ -2751,16 +2942,16 @@ async function describeImageEdit() {
         } else {
             if (subCat === 'outfit') {
                 prompt = promptType === 'detailed'
-                    ? "Please provide a highly detailed, comprehensive breakdown of the clothing and outfit worn by the main person in this image. Describe every visible layer, including the style, cut, color, material, pattern, and any unique details. Include all clothing accessories. Do not describe the person's physical features or background—focus strictly and exclusively on the garments. Provide your description in a single cohesive paragraph."
-                    : "Please concisely describe the clothing and outfit worn by the main person in this image. Focus on style, colors, materials, and distinct clothing layers. Keep it under 5 sentences. Do not describe the person's physical features or background, ONLY the outfit.";
-                prompt += strictNegative;
+                    ? "Please provide a highly detailed, comprehensive breakdown of the clothing and outfit worn by the main person in this image. Describe every visible layer, including the style, cut, length, fit, color, material, pattern, and any unique details. Include all clothing accessories. Do not describe the person's physical features or background—focus strictly and exclusively on the garments. Provide your description in a single cohesive paragraph."
+                    : "Please concisely describe the clothing and outfit worn by the main person in this image. Focus on style, length, colors, materials, and distinct clothing layers. Keep it under 5 sentences. Do not describe the person's physical features or background, ONLY the outfit.";
+                prompt += outfitLengthRule + strictNegative;
             } else if (subCat === 'hairstyle') {
                 // Always brief, 2-3 sentences
                 prompt = "Concisely describe the hairstyle: length, texture, styling, and any hair accessories. Keep it to 2-3 sentences. Do not describe the person's face, clothing, or background—ONLY the hair.";
                 prompt += strictNegative;
             } else if (subCat === 'accessory') {
                 // Always brief, 2-3 sentences
-                prompt = "Concisely describe the accessories: jewelry, headwear, eyewear, bags, belts, gloves, or scarves. Note materials and colors. Keep it to 2-3 sentences. Do not describe clothing or the person—ONLY the accessories.";
+                prompt = "Concisely describe the accessories: jewelry, headwear, eyewear, bags, belts, gloves, or scarves. Note materials and colors, and the length or size where it applies (e.g. choker vs. long pendant, wrist vs. elbow-length gloves, mini vs. large tote). Keep it to 2-3 sentences. Do not describe clothing or the person—ONLY the accessories.";
                 prompt += strictNegative;
             } else if (subCat === 'makeup') {
                 // Always brief, 2-3 sentences

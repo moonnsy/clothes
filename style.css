@@ -591,6 +591,43 @@
 .cl-search-clear { position: absolute; right: 4px; padding: 8px; cursor: pointer; color: #9CA3AF; transition: color 0.2s; }
 .cl-search-clear:hover { color: #E5E7EB; }
 
+/* Full-screen preview viewer */
+.cl-preview-img { cursor: zoom-in; }
+#cl-image-viewer {
+    position: fixed; inset: 0; z-index: 5000;
+    background: rgba(0, 0, 0, 0.92);
+    align-items: center; justify-content: center;
+}
+.cl-viewer-stage {
+    position: absolute; inset: 0; overflow: hidden;
+    display: flex; align-items: center; justify-content: center;
+    touch-action: none; cursor: grab;
+}
+.cl-viewer-stage:active { cursor: grabbing; }
+#cl-viewer-img {
+    max-width: 100%; max-height: 100%; object-fit: contain; display: block;
+    transform-origin: center center; will-change: transform;
+    user-select: none; -webkit-user-select: none; -webkit-user-drag: none;
+}
+.cl-viewer-btn {
+    background: rgba(30, 30, 30, 0.75); color: #E5E7EB;
+    border: 1px solid rgba(255, 255, 255, 0.15); border-radius: 50%;
+    width: 42px; height: 42px; padding: 0; margin: 0; cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 1.05em; transition: background 0.2s;
+}
+.cl-viewer-btn:hover { background: rgba(60, 60, 60, 0.9); color: #fff; }
+.cl-viewer-close {
+    position: absolute; z-index: 1;
+    top: calc(12px + env(safe-area-inset-top, 0px));
+    right: calc(12px + env(safe-area-inset-right, 0px));
+}
+.cl-viewer-tools {
+    position: absolute; z-index: 1; display: flex; gap: 10px;
+    left: 50%; transform: translateX(-50%);
+    bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+}
+
 /* Four section buttons and five header icons on a phone-width header */
 @media (max-width: 480px) {
     .cl-header { padding-left: 10px; padding-right: 10px; gap: 4px; }
