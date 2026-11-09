@@ -584,9 +584,17 @@
 #cl-catalog-frame { flex: 1; width: 100%; min-height: 0; border: 0; background: var(--cl-bg-primary); }
 .cl-catalog-empty { padding: 40px 20px; text-align: center; color: #9CA3AF; font-size: 0.9em; line-height: 1.5; }
 
-/* Four section buttons and four header icons on a phone-width header */
+/* Gallery search */
+.cl-search-bar { position: relative; display: flex; align-items: center; margin-bottom: 12px; }
+.cl-search-bar .cl-input-field { margin: 0; padding-left: 34px; padding-right: 34px; }
+.cl-search-icon { position: absolute; left: 12px; color: #9CA3AF; font-size: 0.85em; pointer-events: none; }
+.cl-search-clear { position: absolute; right: 4px; padding: 8px; cursor: pointer; color: #9CA3AF; transition: color 0.2s; }
+.cl-search-clear:hover { color: #E5E7EB; }
+
+/* Four section buttons and five header icons on a phone-width header */
 @media (max-width: 480px) {
     .cl-header { padding-left: 10px; padding-right: 10px; gap: 4px; }
-    .cl-mode-btn { padding: 7px 7px; }
-    .cl-settings-icon { margin-right: 7px; }
+    .cl-header > div:first-child { gap: 2px !important; }
+    .cl-mode-btn { padding: 7px 6px; }
+    .cl-settings-icon { margin-right: 6px !important; }
 }

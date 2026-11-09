@@ -36,6 +36,7 @@ let npcSection = false;
 let savedChatEntity = null; // the character tab to return to when leaving the NPC section
 let previewBusy = false;
 let activeProfileName = '';
+let searchQuery = ''; // gallery search text, kept while the bar is open
 let currentView = 'gallery'; // 'gallery' | 'edit'
 let editingItemId = null;
 let currentEntity = '';
@@ -624,6 +625,7 @@ function buildModal() {
                     <div style="display:flex; align-items:center;">
                         <i class="fa-solid fa-arrow-up-right-from-square cl-settings-icon interactable" id="cl-btn-catalog-open" title="Open the catalog in a new tab" style="margin-right:15px; font-size:1.05em; display:none;"></i>
                         <i class="fa-solid fa-rotate-right cl-settings-icon interactable" id="cl-btn-catalog-reload" title="Reload the catalog" style="margin-right:15px; font-size:1.05em; display:none;"></i>
+                        <i class="fa-solid fa-magnifying-glass cl-settings-icon interactable" id="cl-btn-search" title="Search by name or description" style="margin-right:15px; font-size:1.05em;"></i>
                         <i class="fa-solid fa-eye-slash cl-settings-icon interactable" id="cl-btn-filter-active" title="Toggle Equipped Items Only" style="margin-right:15px; font-size:1.1em;"></i>
                         <i class="fa-solid fa-arrow-down-short-wide cl-settings-icon interactable" id="cl-btn-sort" title="Oldest first (tap for newest first)" style="margin-right:15px; font-size:1.1em;"></i>
                         <i class="fa-solid fa-ban cl-settings-icon interactable" id="cl-btn-clear-all" title="Unequip All Outfits" style="margin-right:15px; font-size:1.1em;"></i>
@@ -648,6 +650,11 @@ function buildModal() {
 
                 <!-- GALLERY VIEW -->
                 <div class="cl-content cl-view active" id="cl-view-gallery">
+                    <div class="cl-search-bar" id="cl-search-bar" style="display:none;">
+                        <i class="fa-solid fa-magnifying-glass cl-search-icon"></i>
+                        <input type="text" id="cl-search-input" class="cl-input-field" placeholder="Search name or description..." autocomplete="off">
+                        <i class="fa-solid fa-xmark cl-search-clear interactable" id="cl-search-clear" title="Clear search"></i>
+                    </div>
                     <div class="cl-gallery-header" style="display:flex; gap:10px;">
                         <div id="cl-folder-wrapper" style="flex:1; min-width:0;">
                             <select id="cl-folder-select" class="cl-select-field">
@@ -1246,7 +1253,7 @@ function openCatalogView(forceReload) {
 /** The catalog has no characters or items of ours: hide their tabs and buttons there. */
 function updateSectionChrome() {
     $('.cl-tabs').toggle(!catalogSection);
-    $('#cl-btn-filter-active, #cl-btn-sort, #cl-btn-clear-all').toggle(!catalogSection);
+    $('#cl-btn-search, #cl-btn-filter-active, #cl-btn-sort, #cl-btn-clear-all').toggle(!catalogSection);
     $('#cl-btn-catalog-open, #cl-btn-catalog-reload').toggle(catalogSection);
 }
 
@@ -1330,6 +1337,36 @@ function bindEvents() {
         }
     });
     $('#cl-npc-name-input').on('input', renderNpcSuggestions);
+
+    $('#cl-btn-search').on('click', () => {
+        const opening = !$('#cl-search-bar').is(':visible');
+        if (opening && currentView !== 'gallery') return; // the bar lives above the gallery
+        setSearchOpen(opening);
+    });
+    let searchTimer = null;
+    $('#cl-search-input').on('input', function() {
+        searchQuery = $(this).val();
+        updateSearchButton();
+        clearTimeout(searchTimer);
+        searchTimer = setTimeout(renderGallery, 150);
+    });
+    $('#cl-search-input').on('keydown', (e) => {
+        if (e.key === 'Escape') {
+            e.preventDefault();
+            e.stopPropagation();
+            setSearchOpen(false);
+        }
+    });
+    $('#cl-search-clear').on('click', () => {
+        if (searchQuery) {
+            searchQuery = '';
+            $('#cl-search-input').val('').trigger('focus');
+            updateSearchButton();
+            renderGallery();
+        } else {
+            setSearchOpen(false);
+        }
+    });
 
     $('#cl-btn-filter-active').on('click', function() {
         filterActiveOnly = !filterActiveOnly;
@@ -1992,6 +2029,38 @@ function renderFolderBanner(ownItemCount) {
 }
 
 // --- GALLERY LOGIC ---
+// Search looks at the name and the description (the prompt). Every word has to be
+// found in one of them; ё counts as е so the spelling doesn't matter.
+function normalizeForSearch(text) {
+    return String(text || '').toLocaleLowerCase().replace(/ё/g, 'е');
+}
+
+function itemMatchesSearch(item, words) {
+    const haystack = normalizeForSearch(`${item.name || ''}\n${item.description || ''}`);
+    return words.every(w => haystack.includes(w));
+}
+
+function getSearchWords() {
+    return normalizeForSearch(searchQuery).split(/\s+/).filter(Boolean);
+}
+
+function updateSearchButton() {
+    const on = $('#cl-search-bar').is(':visible') || !!searchQuery.trim();
+    $('#cl-btn-search').css('color', on ? 'var(--cl-accent)' : '');
+}
+
+function setSearchOpen(open) {
+    $('#cl-search-bar').toggle(open);
+    if (open) {
+        $('#cl-search-input').trigger('focus');
+    } else if (searchQuery) {
+        searchQuery = '';
+        $('#cl-search-input').val('');
+        renderGallery();
+    }
+    updateSearchButton();
+}
+
 // Items are kept in the order they were added, so "newest first" is that order reversed
 function getSortOrder() {
     return localStorage.getItem('clothes_sort') === 'newest' ? 'newest' : 'oldest';
@@ -2151,6 +2220,14 @@ function renderGallery() {
         // An NPC is already its own folder, so the folder picker is only for chat characters
         $('#cl-folder-wrapper').toggle(!npcSection);
         if (currentMode === 'clothes') $('#cl-subcategory-wrapper').show();
+    }
+
+    const searchWords = getSearchWords();
+    if (searchWords.length) {
+        displayItems = displayItems.filter(item => itemMatchesSearch(item, searchWords));
+        if (!displayItems.length) {
+            $grid.append(`<div class="cl-npc-empty">Nothing matches "${escapeHtml(searchQuery.trim())}" here.</div>`);
+        }
     }
 
     if (getSortOrder() === 'newest') displayItems = [...displayItems].reverse();
