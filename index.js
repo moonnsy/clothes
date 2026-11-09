@@ -545,6 +545,7 @@ function attachToUI() {
         `);
         $('#clothes-wand-item').on('click', () => {
             showModalOnTop();
+            fitHeader();
             currentView = 'gallery';
             
             renderTabs();
@@ -1269,6 +1270,7 @@ function updateSectionChrome() {
     $('.cl-tabs').toggle(!catalogSection);
     $('#cl-btn-search, #cl-btn-filter-active, #cl-btn-sort, #cl-btn-clear-all').toggle(!catalogSection);
     $('#cl-btn-catalog-open, #cl-btn-catalog-reload').toggle(catalogSection);
+    fitHeader();
 }
 
 /**
@@ -2280,7 +2282,6 @@ function renderGallery() {
                     <div class="cl-card-title" title="${item.name}">${item.name || fallbackName}</div>
                 </div>
                 <div class="cl-card-actions">
-                    ${item.preview ? '<button class="cl-card-btn cl-btn-zoom" title="View preview full screen"><i class="fa-solid fa-expand"></i></button>' : ''}
                     <button class="cl-card-btn cl-btn-edit"><i class="fa-solid fa-pen"></i></button>
                     <button class="cl-card-btn cl-card-btn-del cl-btn-del"><i class="fa-solid fa-trash"></i></button>
                 </div>
@@ -2313,11 +2314,6 @@ function renderGallery() {
             }
         });
 
-        $card.find('.cl-btn-zoom').on('click', (e) => {
-            e.stopPropagation();
-            openImageViewer(item.preview);
-        });
-
         // Edit
         $card.find('.cl-btn-edit').on('click', (e) => {
             e.stopPropagation();
@@ -2340,11 +2336,11 @@ function renderGallery() {
 // zoomed picture, a double tap zooms in or back out. ✕, Esc or a tap beside the
 // picture closes it.
 const VIEWER_MAX_SCALE = 8;
-const viewer = { scale: 1, x: 0, y: 0, pointers: new Map(), gesture: null, moved: false, lastTap: 0 };
+const viewer = { scale: 1, x: 0, y: 0, pointers: new Map(), gesture: null, moved: false, lastTap: 0, closeOnClick: false, closedAt: 0 };
 
 function openImageViewer(src) {
     if (!src) return;
-    Object.assign(viewer, { scale: 1, x: 0, y: 0, gesture: null, moved: false, lastTap: 0 });
+    Object.assign(viewer, { scale: 1, x: 0, y: 0, gesture: null, moved: false, lastTap: 0, closeOnClick: false });
     viewer.pointers.clear();
     $('#cl-viewer-img').attr('src', src);
     applyViewerTransform();
@@ -2354,6 +2350,7 @@ function openImageViewer(src) {
 function closeImageViewer() {
     $('#cl-image-viewer').hide();
     $('#cl-viewer-img').attr('src', '');
+    viewer.closedAt = Date.now();
 }
 
 function isViewerOpen() {
@@ -2418,6 +2415,7 @@ function bindImageViewer() {
     stage.addEventListener('pointerdown', (e) => {
         try { stage.setPointerCapture(e.pointerId); } catch { /* pointer already gone */ }
         viewer.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+        viewer.closeOnClick = false;
         if (viewer.pointers.size === 1) viewer.moved = false;
         else viewer.moved = true; // a second finger is a pinch, never a tap
         startViewerGesture();
@@ -2459,7 +2457,10 @@ function bindImageViewer() {
         const r = document.getElementById('cl-viewer-img').getBoundingClientRect();
         const onPicture = e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
         if (!onPicture) {
-            closeImageViewer();
+            // Close on the click that follows, not here: hidden now, the viewer would let
+            // that click land on whatever is underneath (it deleted a preview once)
+            viewer.closeOnClick = true;
+            setTimeout(() => { if (viewer.closeOnClick) { viewer.closeOnClick = false; closeImageViewer(); } }, 500);
             return;
         }
         const now = Date.now();
@@ -2477,6 +2478,22 @@ function bindImageViewer() {
     };
     stage.addEventListener('pointerup', endPointer);
     stage.addEventListener('pointercancel', endPointer);
+    stage.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (!viewer.closeOnClick) return;
+        viewer.closeOnClick = false;
+        closeImageViewer();
+    });
+
+    // A phone can still deliver a late click after the viewer is gone; swallow it so it
+    // doesn't press a button in the wardrobe under the finger
+    document.addEventListener('click', (e) => {
+        if (Date.now() - viewer.closedAt < 450 && e.target.closest && e.target.closest('#cl-modal')) {
+            e.preventDefault();
+            e.stopPropagation();
+        }
+    }, true);
 
     stage.addEventListener('wheel', (e) => {
         e.preventDefault();
@@ -2499,7 +2516,14 @@ function bindImageViewer() {
             closeImageViewer();
         }
     }, true);
-    $(window).on('resize', () => { if (isViewerOpen()) applyViewerTransform(); });
+    $(window).on('resize', () => {
+        if (isViewerOpen()) applyViewerTransform();
+        fitHeader();
+    });
+    // Also catches size changes that aren't a window resize, like switching to full screen
+    if (typeof ResizeObserver === 'function') {
+        new ResizeObserver(() => fitHeader()).observe(document.querySelector('#cl-modal .cl-header'));
+    }
 }
 
 // --- EDIT LOGIC ---
@@ -3275,6 +3299,19 @@ function saveLocalMirror() {
 
 function applyFullscreen(on) {
     $('#cl-modal').toggleClass('cl-fullscreen', !!on);
+    fitHeader();
+}
+
+/**
+ * Tightens the header spacing only when the buttons don't fit at full spacing. The
+ * room depends on the screen, full-screen mode and the theme's font size, so it is
+ * measured rather than guessed from the screen width.
+ */
+function fitHeader() {
+    const header = document.querySelector('#cl-modal .cl-header');
+    if (!header || !header.offsetWidth) return; // hidden: measured when the wardrobe opens
+    header.classList.remove('cl-header-tight');
+    if (header.scrollWidth > header.clientWidth + 1) header.classList.add('cl-header-tight');
 }
 
 function getQuickAccessMode() {

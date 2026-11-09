@@ -72,7 +72,7 @@
 /* Mode Switcher */
 .cl-mode-btn {
     background: transparent; border: none; color: #9CA3AF; font-size: 1em;
-    font-weight: 600; cursor: pointer; transition: 0.2s; padding: 7px 11px;
+    font-weight: 600; cursor: pointer; transition: color 0.2s, background 0.2s; padding: 7px 11px;
     border-radius: 8px; display: inline-flex; align-items: center; justify-content: center; gap: 5px;
     white-space: nowrap;
 }
@@ -628,10 +628,8 @@
     bottom: calc(16px + env(safe-area-inset-bottom, 0px));
 }
 
-/* Four section buttons and five header icons on a phone-width header */
-@media (max-width: 480px) {
-    .cl-header { padding-left: 10px; padding-right: 10px; gap: 4px; }
-    .cl-header > div:first-child { gap: 2px !important; }
-    .cl-mode-btn { padding: 7px 6px; }
-    .cl-settings-icon { margin-right: 6px !important; }
-}
+/* Set by fitHeader() only when the header buttons don't fit at full spacing */
+.cl-header.cl-header-tight { padding-left: 10px; padding-right: 10px; gap: 4px; }
+.cl-header.cl-header-tight > div:first-child { gap: 2px !important; }
+.cl-header.cl-header-tight .cl-mode-btn { padding: 7px 6px; }
+.cl-header.cl-header-tight .cl-settings-icon { margin-right: 6px !important; }
