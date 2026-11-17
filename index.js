@@ -1276,11 +1276,11 @@ function openCatalogView(forceReload) {
         // keep refusing to navigate it, and Reload would show the same blank page
         const fresh = frame.cloneNode(false);
         fresh.removeAttribute('src');
+        fresh.removeAttribute('srcdoc');
+        fresh.removeAttribute('sandbox');
         fresh.dataset.src = url;
         frame.replaceWith(fresh);
-        // Tell the site it is inside the wardrobe, so its copy buttons send items here
-        fresh.addEventListener('load', () => greetCatalog(fresh, url));
-        fresh.src = url;
+        loadCatalogFrame(fresh, url);
         frame = fresh;
     }
     $(frame).toggle(!!url);
@@ -1288,10 +1288,71 @@ function openCatalogView(forceReload) {
 }
 
 // --- ITEMS SENT FROM THE CATALOG ---
-// The catalog site lives on another origin, so it can't touch the wardrobe and we can't
-// see its buttons. Instead we greet it after it loads; a site that knows the greeting
-// then posts { source: 'outfit-catalog', type: 'add-to-wardrobe', text, title,
-// categories } when its copy button is pressed, and we turn that into a card.
+// The catalog site lives on another origin, so we can't see its buttons. Two ways in:
+// 1. Hooked: we download the page ourselves and show it with a small script of ours put
+//    in first. That script catches the site's copying (clipboard.writeText and
+//    execCommand('copy')) and posts the text here instead, so any version of the site
+//    works. Needs a host that lets other sites read its pages (GitHub Pages does).
+// 2. Direct: if the page can't be downloaded (a local server without CORS), it opens
+//    normally and we greet it; a site that knows the greeting posts the text itself.
+// Either way the message is { source: 'outfit-catalog', type: 'add-to-wardrobe', text,
+// title, categories } and we turn it into a card.
+
+// No allow-same-origin: the hooked page runs as an opaque origin, so it can't reach the
+// tavern. Its own saved state (localStorage) is unavailable there; the site copes.
+const CATALOG_SANDBOX = 'allow-scripts allow-popups allow-popups-to-escape-sandbox allow-forms allow-modals allow-downloads';
+const CATALOG_HOOK = `<script>(function () {
+  function send(text) {
+    text = String(text == null ? '' : text);
+    if (text.trim()) parent.postMessage({ source: 'outfit-catalog', type: 'add-to-wardrobe', text: text, title: '', categories: [] }, '*');
+  }
+  try {
+    var fake = {
+      writeText: function (t) { send(t); return Promise.resolve(); },
+      readText: function () { return Promise.resolve(''); },
+      write: function () { return Promise.reject(new Error('Not available in the wardrobe')); },
+      read: function () { return Promise.reject(new Error('Not available in the wardrobe')); }
+    };
+    Object.defineProperty(navigator, 'clipboard', { value: fake, configurable: true });
+  } catch (e) {}
+  var exec = document.execCommand;
+  document.execCommand = function (cmd) {
+    if (String(cmd).toLowerCase() === 'copy') {
+      var a = document.activeElement, s = '';
+      if (a && typeof a.value === 'string' && typeof a.selectionStart === 'number') s = a.value.substring(a.selectionStart, a.selectionEnd);
+      if (!s) s = String(window.getSelection ? getSelection() : '');
+      send(s);
+      return true;
+    }
+    return exec.apply(document, arguments);
+  };
+})();<\/script>`;
+
+/** The page with our <base> (so its own files still load from its host) and hook put first. */
+function injectCatalogHook(html, baseUrl) {
+    const head = `<base href="${escapeHtml(baseUrl)}">${CATALOG_HOOK}`;
+    const m = html.match(/<head[^>]*>/i);
+    return m ? html.replace(m[0], m[0] + head) : head + html;
+}
+
+async function loadCatalogFrame(frame, url) {
+    try {
+        const res = await fetch(url, { cache: 'no-cache' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const html = await res.text();
+        if (frame.dataset.src !== url || !frame.isConnected) return; // replaced meanwhile
+        frame.setAttribute('sandbox', CATALOG_SANDBOX);
+        frame.dataset.mode = 'hooked';
+        frame.srcdoc = injectCatalogHook(html, res.url || url);
+    } catch (e) {
+        if (frame.dataset.src !== url || !frame.isConnected) return;
+        console.info(`${LOG_PREFIX} catalog can't be downloaded (${e.message}); opening it directly`);
+        frame.dataset.mode = 'direct';
+        // Tell the site it is inside the wardrobe, so its copy buttons send items here
+        frame.addEventListener('load', () => greetCatalog(frame, url));
+        frame.src = url;
+    }
+}
 const CATALOG_SUBCATEGORY = { hair: 'hairstyle', makeup: 'makeup', jewelry: 'accessory', accessory: 'accessory', bag: 'accessory', headwear: 'accessory' };
 const CATALOG_TEXT_LIMIT = 20000;
 let catalogPending = null; // { text, who: {entity, type}, sub }
