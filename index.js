@@ -928,17 +928,18 @@ function buildModal() {
         <!-- An item sent over from the outfit catalog: whose wardrobe and which section -->
         <div id="cl-catalog-add-modal" class="cl-modal-overlay" style="display:none;">
             <div class="cl-modal-box cl-catalog-add-box">
-                <h3 style="margin:0 0 10px 0; color:#E5E7EB; font-size:1.1em;">Add to wardrobe</h3>
+                <h3 style="margin:0 0 10px 0; color:#E5E7EB; font-size:1.1em;">Add to Clothes</h3>
                 <div class="cl-catalog-add-text" id="cl-catalog-add-text"></div>
                 <span class="cl-label">Name</span>
                 <input type="text" id="cl-catalog-add-name" class="cl-input-field" maxlength="80" autocomplete="off">
-                <span class="cl-label">Whose wardrobe</span>
+                <span class="cl-label">For</span>
                 <div class="cl-catalog-add-chips" id="cl-catalog-add-who"></div>
                 <span class="cl-label">Section</span>
                 <div class="cl-catalog-add-chips" id="cl-catalog-add-sub"></div>
-                <div style="display:flex; justify-content:center; gap:10px; margin-top:16px;">
+                <button class="cl-btn" id="cl-btn-catalog-add-preview" style="width:100%; margin:16px 0 0 0; padding:11px;"><i class="fa-solid fa-image"></i> Add + make preview</button>
+                <div style="display:flex; justify-content:center; gap:10px; margin-top:10px;">
                     <button class="cl-btn cl-btn-secondary" id="cl-btn-catalog-add-cancel" style="flex:1; margin:0; padding:10px;">Cancel</button>
-                    <button class="cl-btn" id="cl-btn-catalog-add-ok" style="flex:1; margin:0; padding:10px;"><i class="fa-solid fa-plus"></i> Add</button>
+                    <button class="cl-btn cl-btn-secondary" id="cl-btn-catalog-add-ok" style="flex:1; margin:0; padding:10px;"><i class="fa-solid fa-plus"></i> Add only</button>
                 </div>
             </div>
         </div>
@@ -1363,8 +1364,18 @@ function closeCatalogAddModal() {
     catalogPending = null;
 }
 
-/** Creates the card the same way the editor does for a new item, then stays in the catalog. */
-function confirmCatalogAdd() {
+/** Opens a wardrobe card in the editor, leaving the catalog page loaded behind it. */
+function openWardrobeItem(entity, type, itemId) {
+    $('.cl-mode-btn[data-mode="clothes"]').trigger('click');
+    switchTab(entity, type);
+    openEditView(itemId);
+}
+
+/**
+ * Creates the card the same way the editor does for a new item. With makePreview it
+ * opens the card and starts the preview right away; otherwise it stays in the catalog.
+ */
+function confirmCatalogAdd(makePreview = false) {
     const p = catalogPending;
     if (!p || !p.who) return;
     const { entity, type } = p.who;
@@ -1397,22 +1408,24 @@ function confirmCatalogAdd() {
     localStorage.setItem('clothes_catalog_last_target', `${type}:${entity}`);
     closeCatalogAddModal();
 
+    if (makePreview) {
+        openWardrobeItem(entity, type, newItem.id);
+        generatePreviewForCurrentEdit();
+        return;
+    }
     toastr.success(`Tap to open it.`, `"${name}" added to ${entity}`, {
         timeOut: 7000,
         extendedTimeOut: 3000,
-        onclick: () => {
-            $('.cl-mode-btn[data-mode="clothes"]').trigger('click');
-            switchTab(entity, type);
-            openEditView(newItem.id);
-        },
+        onclick: () => openWardrobeItem(entity, type, newItem.id),
     });
 }
 
 function bindCatalogAdd() {
     window.addEventListener('message', onCatalogMessage);
     $('#cl-btn-catalog-add-cancel').on('click', closeCatalogAddModal);
-    $('#cl-btn-catalog-add-ok').on('click', confirmCatalogAdd);
-    $('#cl-catalog-add-name').on('keydown', (e) => { if (e.key === 'Enter') confirmCatalogAdd(); });
+    $('#cl-btn-catalog-add-ok').on('click', () => confirmCatalogAdd(false));
+    $('#cl-btn-catalog-add-preview').on('click', () => confirmCatalogAdd(true));
+    $('#cl-catalog-add-name').on('keydown', (e) => { if (e.key === 'Enter') confirmCatalogAdd(true); });
 }
 
 /** The catalog has no characters or items of ours: hide their tabs and buttons there. */
