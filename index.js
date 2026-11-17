@@ -3534,8 +3534,14 @@ function applyFullscreen(on) {
 function fitHeader() {
     const header = document.querySelector('#cl-modal .cl-header');
     if (!header || !header.offsetWidth) return; // hidden: measured when the wardrobe opens
-    header.classList.remove('cl-header-tight');
-    if (header.scrollWidth > header.clientWidth + 1) header.classList.add('cl-header-tight');
+    const steps = ['cl-header-tight-1', 'cl-header-tight-2', 'cl-header-tight-3'];
+    header.classList.remove(...steps);
+    const overflows = () => header.scrollWidth > header.clientWidth + 1;
+    for (const step of steps) {
+        if (!overflows()) break;
+        header.classList.remove(...steps);
+        header.classList.add(step);
+    }
 }
 
 function getQuickAccessMode() {

@@ -581,6 +581,8 @@
 
 /* Outfit catalog: the site fills the whole content area */
 #cl-view-catalog.active { display: flex; flex-direction: column; padding: 0; overflow: hidden; }
+/* Full screen gives every view side padding; the catalog site should reach the edges */
+#cl-modal.cl-fullscreen #cl-view-catalog.active { padding: 0 0 env(safe-area-inset-bottom, 0px) 0; }
 #cl-catalog-frame { flex: 1; width: 100%; min-height: 0; border: 0; background: var(--cl-bg-primary); }
 .cl-catalog-empty { padding: 40px 20px; text-align: center; color: #9CA3AF; font-size: 0.9em; line-height: 1.5; }
 
@@ -639,7 +641,11 @@
 }
 
 /* Set by fitHeader() only when the header buttons don't fit at full spacing */
-.cl-header.cl-header-tight { padding-left: 10px; padding-right: 10px; gap: 4px; }
-.cl-header.cl-header-tight > div:first-child { gap: 2px !important; }
-.cl-header.cl-header-tight .cl-mode-btn { padding: 7px 6px; }
-.cl-header.cl-header-tight .cl-settings-icon { margin-right: 6px !important; }
+/* Steps, tried in order. The section buttons on the left only shrink at the last one,
+   so they don't jump around when the right side changes between sections. */
+.cl-header.cl-header-tight-1 .cl-settings-icon { margin-right: 7px !important; }
+.cl-header.cl-header-tight-2 .cl-settings-icon { margin-right: 3px !important; }
+.cl-header.cl-header-tight-3 { padding-left: 10px; padding-right: 10px; gap: 4px; }
+.cl-header.cl-header-tight-3 > div:first-child { gap: 2px !important; }
+.cl-header.cl-header-tight-3 .cl-mode-btn { padding: 7px 6px; }
+.cl-header.cl-header-tight-3 .cl-settings-icon { margin-right: 3px !important; }
