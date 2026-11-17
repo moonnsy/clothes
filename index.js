@@ -925,6 +925,24 @@ function buildModal() {
             </div>
         </div>
 
+        <!-- An item sent over from the outfit catalog: whose wardrobe and which section -->
+        <div id="cl-catalog-add-modal" class="cl-modal-overlay" style="display:none;">
+            <div class="cl-modal-box cl-catalog-add-box">
+                <h3 style="margin:0 0 10px 0; color:#E5E7EB; font-size:1.1em;">Add to wardrobe</h3>
+                <div class="cl-catalog-add-text" id="cl-catalog-add-text"></div>
+                <span class="cl-label">Name</span>
+                <input type="text" id="cl-catalog-add-name" class="cl-input-field" maxlength="80" autocomplete="off">
+                <span class="cl-label">Whose wardrobe</span>
+                <div class="cl-catalog-add-chips" id="cl-catalog-add-who"></div>
+                <span class="cl-label">Section</span>
+                <div class="cl-catalog-add-chips" id="cl-catalog-add-sub"></div>
+                <div style="display:flex; justify-content:center; gap:10px; margin-top:16px;">
+                    <button class="cl-btn cl-btn-secondary" id="cl-btn-catalog-add-cancel" style="flex:1; margin:0; padding:10px;">Cancel</button>
+                    <button class="cl-btn" id="cl-btn-catalog-add-ok" style="flex:1; margin:0; padding:10px;"><i class="fa-solid fa-plus"></i> Add</button>
+                </div>
+            </div>
+        </div>
+
         <!-- Full-screen preview viewer -->
         <div id="cl-image-viewer" style="display:none;">
             <div class="cl-viewer-stage" id="cl-viewer-stage">
@@ -942,6 +960,7 @@ function buildModal() {
 
     bindEvents();
     bindImageViewer();
+    bindCatalogAdd();
     clInitCustomSelects();
 }
 
@@ -1258,11 +1277,142 @@ function openCatalogView(forceReload) {
         fresh.removeAttribute('src');
         fresh.dataset.src = url;
         frame.replaceWith(fresh);
+        // Tell the site it is inside the wardrobe, so its copy buttons send items here
+        fresh.addEventListener('load', () => greetCatalog(fresh, url));
         fresh.src = url;
         frame = fresh;
     }
     $(frame).toggle(!!url);
     showView('catalog');
+}
+
+// --- ITEMS SENT FROM THE CATALOG ---
+// The catalog site lives on another origin, so it can't touch the wardrobe and we can't
+// see its buttons. Instead we greet it after it loads; a site that knows the greeting
+// then posts { source: 'outfit-catalog', type: 'add-to-wardrobe', text, title,
+// categories } when its copy button is pressed, and we turn that into a card.
+const CATALOG_SUBCATEGORY = { hair: 'hairstyle', makeup: 'makeup', jewelry: 'accessory', accessory: 'accessory', bag: 'accessory', headwear: 'accessory' };
+const CATALOG_TEXT_LIMIT = 20000;
+let catalogPending = null; // { text, who: {entity, type}, sub }
+
+function greetCatalog(frame, url) {
+    try {
+        frame.contentWindow.postMessage({ source: 'clothes-wardrobe', type: 'hello', version: 1 }, new URL(url).origin);
+    } catch (e) {
+        console.warn(`${LOG_PREFIX} could not greet the catalog:`, e);
+    }
+}
+
+/** The catalog's categories, mapped to ours: all hair is a hairstyle, a mix is an outfit. */
+function guessCatalogSubCategory(categories) {
+    const mapped = (Array.isArray(categories) ? categories : []).map(c => CATALOG_SUBCATEGORY[c] || 'outfit');
+    return mapped.length && mapped.every(m => m === mapped[0]) ? mapped[0] : 'outfit';
+}
+
+function onCatalogMessage(event) {
+    const frame = document.getElementById('cl-catalog-frame');
+    // Only the catalog frame we opened; any other window is ignored
+    if (!frame || event.source !== frame.contentWindow) return;
+    const data = event.data;
+    if (!data || data.source !== 'outfit-catalog' || data.type !== 'add-to-wardrobe') return;
+    const text = typeof data.text === 'string' ? data.text.trim().slice(0, CATALOG_TEXT_LIMIT) : '';
+    if (!text) return;
+    const title = typeof data.title === 'string' ? data.title.trim().slice(0, 80) : '';
+    openCatalogAddModal(text, title, guessCatalogSubCategory(data.categories));
+}
+
+function catalogTargets() {
+    const { userName, members } = getChatMembers();
+    return [{ entity: userName, type: 'user' }, ...members.map(m => ({ entity: m, type: 'char' }))];
+}
+
+function openCatalogAddModal(text, title, sub) {
+    const targets = catalogTargets();
+    const last = localStorage.getItem('clothes_catalog_last_target') || '';
+    const who = targets.find(t => `${t.type}:${t.entity}` === last) || targets[0];
+    catalogPending = { text, who, sub };
+
+    $('#cl-catalog-add-text').text(text);
+    $('#cl-catalog-add-name').val(title);
+    renderCatalogAddChips();
+    $('#cl-catalog-add-modal').css('display', 'flex');
+}
+
+function renderCatalogAddChips() {
+    const p = catalogPending;
+    const $who = $('#cl-catalog-add-who').empty();
+    catalogTargets().forEach(t => {
+        const on = p.who && p.who.entity === t.entity && p.who.type === t.type;
+        $('<div class="cl-tag-chip">')
+            .toggleClass('active', on)
+            .append($('<i>').addClass(t.type === 'user' ? 'fa-solid fa-user' : 'fa-solid fa-masks-theater'), document.createTextNode(' ' + t.entity))
+            .on('click', () => { p.who = t; renderCatalogAddChips(); })
+            .appendTo($who);
+    });
+    const $sub = $('#cl-catalog-add-sub').empty();
+    const subNames = { outfit: 'Outfit', hairstyle: 'Hairstyle', accessory: 'Accessories', makeup: 'Makeup' };
+    Object.entries(subNames).forEach(([key, label]) => {
+        $('<div class="cl-tag-chip">').toggleClass('active', p.sub === key).text(label)
+            .on('click', () => { p.sub = key; renderCatalogAddChips(); })
+            .appendTo($sub);
+    });
+}
+
+function closeCatalogAddModal() {
+    $('#cl-catalog-add-modal').hide();
+    catalogPending = null;
+}
+
+/** Creates the card the same way the editor does for a new item, then stays in the catalog. */
+function confirmCatalogAdd() {
+    const p = catalogPending;
+    if (!p || !p.who) return;
+    const { entity, type } = p.who;
+    const subNames = { outfit: 'Outfit', hairstyle: 'Hairstyle', accessory: 'Accessory', makeup: 'Makeup' };
+    const count = clothesState.items.filter(i => i.type === type && i.category === 'clothes' && (i.subCategory || 'outfit') === p.sub).length;
+    const name = String($('#cl-catalog-add-name').val() || '').trim() || `${subNames[p.sub]} ${count + 1}`;
+
+    const newItem = {
+        id: generateId(),
+        category: 'clothes',
+        type: type,
+        folder: entity,
+        subCategory: p.sub,
+        name: name,
+        description: p.text,
+        images: [],
+        imageBase64: '',
+        tags: [],
+    };
+    clothesState.items.push(newItem);
+    // Like a new item made in the editor: worn right away if that slot is empty
+    const activeItems = getActiveItems('clothes');
+    if (!activeItems[entity] || !activeItems[entity][p.sub]) {
+        setActiveItem(entity, newItem.id, 'clothes', p.sub);
+    }
+    saveState();
+    updateSTScriptVariables();
+    updateContext();
+    updateStorageStatus();
+    localStorage.setItem('clothes_catalog_last_target', `${type}:${entity}`);
+    closeCatalogAddModal();
+
+    toastr.success(`Tap to open it.`, `"${name}" added to ${entity}`, {
+        timeOut: 7000,
+        extendedTimeOut: 3000,
+        onclick: () => {
+            $('.cl-mode-btn[data-mode="clothes"]').trigger('click');
+            switchTab(entity, type);
+            openEditView(newItem.id);
+        },
+    });
+}
+
+function bindCatalogAdd() {
+    window.addEventListener('message', onCatalogMessage);
+    $('#cl-btn-catalog-add-cancel').on('click', closeCatalogAddModal);
+    $('#cl-btn-catalog-add-ok').on('click', confirmCatalogAdd);
+    $('#cl-catalog-add-name').on('keydown', (e) => { if (e.key === 'Enter') confirmCatalogAdd(); });
 }
 
 /** The catalog has no characters or items of ours: hide their tabs and buttons there. */

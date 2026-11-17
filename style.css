@@ -591,6 +591,16 @@
 .cl-search-clear { position: absolute; right: 4px; padding: 8px; cursor: pointer; color: #9CA3AF; transition: color 0.2s; }
 .cl-search-clear:hover { color: #E5E7EB; }
 
+/* Item sent over from the outfit catalog */
+.cl-catalog-add-box { max-width: 440px; max-height: 88%; overflow-y: auto; box-sizing: border-box; }
+.cl-catalog-add-text {
+    max-height: 120px; overflow-y: auto; padding: 8px 10px;
+    background: var(--cl-bg-input); border: 1px solid var(--cl-border); border-radius: 8px;
+    color: #D1D5DB; font-size: 0.8em; line-height: 1.45; white-space: pre-wrap; word-break: break-word;
+}
+.cl-catalog-add-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.cl-catalog-add-chips .cl-tag-chip { margin: 0; }
+
 /* Full-screen preview viewer */
 .cl-preview-img { cursor: zoom-in; }
 #cl-image-viewer {
